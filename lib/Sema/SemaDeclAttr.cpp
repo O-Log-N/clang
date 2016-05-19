@@ -5466,6 +5466,12 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
   case AttributeList::AT_TypeTagForDatatype:
     handleTypeTagForDatatypeAttr(S, D, Attr);
     break;
+  case AttributeList::AT_HareMapping:
+    handleAttrWithMessage<HareMappingAttr>(S, D, Attr);
+    break;
+  case AttributeList::AT_HareEncodeAs:
+    handleAttrWithMessage<HareEncodeAsAttr>(S, D, Attr);
+    break;
   }
 }
 

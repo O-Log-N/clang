@@ -2170,3 +2170,17 @@ def InternalLinkage : InheritableAttr {
   let Subjects = SubjectList<[Var, Function, CXXRecord]>;
   let Documentation = [InternalLinkageDocs];
 }
+
+def HareMapping : InheritableAttr {
+  let Spellings = [CXX11<"hare","mapping">];
+  let Args = [StringArgument<"Argument", 1>];
+  let Subjects = SubjectList<[CXXRecord]>;
+  let Documentation = [HareMappingDocs];
+}
+
+def HareEncodeAs : InheritableAttr {
+  let Spellings = [CXX11<"hare","encode_as">];
+  let Args = [StringArgument<"Encoding">];
+//  let Subjects = SubjectList<[Field]>;
+  let Documentation = [HareEncodeAsDocs];
+}

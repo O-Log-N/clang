@@ -1859,3 +1859,35 @@ Marking virtual functions as ``disable_tail_calls`` is legal.
 
   }];
 }
+
+def DocCatHare : DocumentationCategory<"Hare-IDL"> {
+  let Content = [{
+Additional attributes used to modify the encoding when used by Hare-IDL tool.
+  }];
+}
+
+def HareMappingDocs : Documentation {
+  let Category = DocCatHare;
+  let Content = [{
+A class or struct declared as with ``[[hare::mapping]]`` shall be involved in Hare-IDL interaction.
+The optional string argument will be added as attribute to the MAPPING structure.
+.. code-block:: c++
+
+  class [[hare::mapping]] MyClass {
+  };
+
+  class [[hare::mapping("MyPublishableStruct")]] MyClass {
+  };
+
+  }];
+}
+
+def HareEncodeAsDocs : Documentation {
+  let Category = DocCatHare;
+  let Content = [{
+The ``[[hare::encode_as()]]`` attribute allow to pass an string with encoding specific information to Hare-IDL tool.
+.. code-block:: c++
+
+  [[hare::encode_as("DELTA VLQ")]] double value;
+  }];
+}
