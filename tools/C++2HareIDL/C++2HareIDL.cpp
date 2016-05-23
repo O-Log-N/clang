@@ -25,6 +25,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/TargetSelect.h"
 
+#include "front-back/idl_tree.h"
+#include "debug.h"
+
 using namespace clang;
 using namespace clang::tooling;
 using namespace llvm;
@@ -62,12 +65,16 @@ class FindNamedClassVisitor
     : public RecursiveASTVisitor<FindNamedClassVisitor> {
 private:
     ASTContext *context;
-    raw_ostream& os;
     map<const Type*, string> typeMapping;
+    Root root;
 
 public:
-    explicit FindNamedClassVisitor(ASTContext *context, raw_ostream& os)
-        : context(context), os(os) {}
+    explicit FindNamedClassVisitor(ASTContext *context)
+        : context(context) {}
+
+    void SerializeTree(raw_ostream& os) {
+        dbgDumpTree(&root, true, os);
+    }
 
     bool VisitTypedefNameDecl(TypedefNameDecl* declaration) {
 
@@ -121,33 +128,40 @@ public:
     }
 
 private:
-    void addMapping(CXXRecordDecl *declaration, const string& name) const {
+    void addMapping(CXXRecordDecl *declaration, const string& name) {
 
 //        declaration->dump();
+        unique_ptr<Structure> str(new Structure);
 
-        FullSourceLoc fullLocation = context->getFullLoc(declaration->getLocStart());
-        string fn = fullLocation.getManager().getFilename(fullLocation).str();
-        unsigned int line = fullLocation.getSpellingLineNumber();
-        os << "#line " << line << " \"" << fn << "\";\n";
+        str->name = name;
+        str->declType = Structure::MAPPING;
+        str->type = Structure::STRUCT;
+
+        str->location = getLocation(declaration->getLocStart());
 
         string mappingArgs;
         if (declaration->hasAttr<HareMappingAttr>()) {
             HareMappingAttr* at = declaration->getAttr<HareMappingAttr>();
             StringRef ma = at->getArgument();
             if (!ma.empty()) {
-                mappingArgs += ", Attribute=\"";
-                mappingArgs += ma;
-                mappingArgs += "\" ";
+                Variant val;
+                val.kind = Variant::STRING;
+                val.stringValue = ma.str();
+                str->encodingSpecifics.attrs["Attribute"] = val;
             }
         }
 
-        os << "MAPPING( FrontEnd=\"1.0\"" << mappingArgs << ") PUBLISHABLE-STRUCT " << name << " {\n";
-        ++line;
-
         RecordDecl::field_range r = declaration->fields();
         for (auto it = r.begin(); it != r.end(); ++it) {
+
+            unique_ptr<DataMember> dm(new DataMember());
             FieldDecl* current = *it;
-            string n = current->getDeclName().getAsString();
+
+            dm->location = getLocation(current->getLocStart());
+
+            string currentName = current->getDeclName().getAsString();
+
+            dm->name = currentName;
 //                string t = current->getType().getCanonicalType().getAsString();
             QualType qt = current->getType();
 
@@ -160,30 +174,33 @@ private:
             auto mapIt = typeMapping.find(t);
             string typeName = mapIt != typeMapping.end() ? mapIt->second : qt.getAsString();
 
-            FullSourceLoc currentLoc = context->getFullLoc(current->getLocStart());
-            fixLineNumber(os, fn, line, currentLoc);
+            dm->type.mappingName = typeName;
 
-            os << typeName << " ";
             //assert(t);
             if (t->isEnumeralType()) {
+
+                dm->type.kind = DataType::ENUM;
+
                 EnumDecl* ed = t->getAs<EnumType>()->getDecl();
                 auto r = ed->enumerators();
                 if (r.begin() != r.end()) {
-                    os << "{";
                     for (auto it = r.begin(); it != r.end(); ++it) {
-                        if(it != r.begin())
-                            os << ",";
-
-                        os << it->getName();
-                        os << "=";
-                        os << it->getInitVal();
+                        
+                        const APSInt& val = it->getInitVal();
+                        typedef decltype(dm->type.enumValues)::value_type::second_type st;
+                        if (val >= numeric_limits<st>::min() && val <= numeric_limits<st>::max()) {
+                            dm->type.enumValues[it->getName()] = static_cast<st>(val.getExtValue());
+                        }
+//                        else
+//                            reportError();
                     }
-                    os << "} ";
                 }
             }
+            else {
+                dm->type.kind = DataType::MAPPING_SPECIFIC;
+            }
 
-            os << current->getDeclName().getAsString() << ";\n";
-            ++line;
+            str->members.emplace_back(dm.release());
             /*
             if (current->hasAttr<HareEncodeAsAttr>()) {
                 HareEncodeAsAttr* at = current->getAttr<HareEncodeAsAttr>();
@@ -199,46 +216,32 @@ private:
             else
 */
         }
-        os << "};\n\n";
+        root.structures.push_back(std::move(str));
     }
 
-    void fixLineNumber(raw_ostream& os, string& fileName, unsigned int& line, FullSourceLoc location) const {
-        unsigned int currentLine = location.getSpellingLineNumber();
-        StringRef currentFileName = location.getManager().getFilename(location);
+    Location getLocation(const SourceLocation& loc) const {
+        Location location;
 
-        if (fileName != currentFileName) {
-            fileName = currentFileName;
-            line = currentLine;
-            os << "#line " << line << " \"" << fileName << "\";\n";
-        }
-        else {
+        FullSourceLoc fullLoc = context->getFullLoc(loc);
+        location.lineNumber = fullLoc.getSpellingLineNumber();
+        location.fileName = fullLoc.getManager().getFilename(fullLoc).str();
 
-            if (currentLine != line) {
-                if (currentLine > line && currentLine - line < 10) {
-                    while (currentLine != line) {
-                        os << "\n";
-                        ++line;
-                    }
-                }
-                else {
-                    line = currentLine;
-                    os << "#line " << line << ";\n";
-                }
-            }
-        }
-
+        return location;
     }
+
 };
 
 class FindNamedClassConsumer : public ASTConsumer {
 private:
     FindNamedClassVisitor visitor;
+    raw_ostream& os;
 public:
     explicit FindNamedClassConsumer(ASTContext *context, raw_ostream& os)
-        : visitor(context, os) {}
+        : visitor(context), os(os) {}
 
     virtual void HandleTranslationUnit(ASTContext &context) {
         visitor.TraverseDecl(context.getTranslationUnitDecl());
+        visitor.SerializeTree(os);
     }
 };
 
@@ -283,6 +286,7 @@ int main(int argc, const char **argv) {
     std::error_code EC;
     raw_fd_ostream OS(fname, EC, sys::fs::F_None);
 
+    //EC = sys::fs::openFileForWrite(Filename, FD, Flags);
     if (EC) {
         errs() << "Failed to open output file '" << fname << "'\n"
             << EC.message() << "\n";
