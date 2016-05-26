@@ -27,6 +27,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "llvm/Support/TargetSelect.h"
 
 #include "front-back/idl_tree.h"
+#include "front-back/idl_tree_serializer.h"
+#include "front-back/raiistdiofile.h"
 #include "debug.h"
 
 
@@ -83,11 +85,17 @@ public:
     explicit FindNamedClassVisitor(ASTContext *context)
         : context(context) {}
 
-    void SerializeTree(raw_ostream& stream) {
-        if (Print || Serialize)
-            dbgDumpTree(&root, true, stream);
-        else
-            stream << os.str();
+    void SerializeTree(FILE* ostream) {
+        if (Print)
+            printRoot(root);
+        else if (Serialize) {
+            OStream OS(ostream);
+            serializeRoot(root, OS);
+        }
+        else {
+            string buffer = os.str();
+            fwrite(buffer.c_str(), buffer.size(), 1, ostream);
+        }
     }
 
     bool VisitTypedefNameDecl(TypedefNameDecl* declaration) {
@@ -363,9 +371,9 @@ private:
 class FindNamedClassConsumer : public ASTConsumer {
 private:
     FindNamedClassVisitor visitor;
-    raw_ostream& os;
+    FILE* os;
 public:
-    explicit FindNamedClassConsumer(ASTContext *context, raw_ostream& os)
+    explicit FindNamedClassConsumer(ASTContext *context, FILE* os)
         : visitor(context), os(os) {}
 
     virtual void HandleTranslationUnit(ASTContext &context) {
@@ -376,9 +384,9 @@ public:
 
 class FindNamedClassAction : public ASTFrontendAction {
 private:
-    raw_ostream& os;
+    FILE* os;
 public:
-    FindNamedClassAction(raw_ostream& os) :os(os) {}
+    FindNamedClassAction(FILE* os) :os(os) {}
     virtual unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &compiler, StringRef inFile) {
         return unique_ptr<ASTConsumer>(new FindNamedClassConsumer(&compiler.getASTContext(), os));
     }
@@ -386,9 +394,9 @@ public:
 
 class FindNamedClassActionFactory : public FrontendActionFactory {
 private:
-    raw_ostream& os;
+    FILE* os;
 public:
-    FindNamedClassActionFactory(raw_ostream& os) :os(os) {}
+    FindNamedClassActionFactory(FILE* os) :os(os) {}
     FrontendAction *create() override { return new FindNamedClassAction(os); }
 };
 
@@ -409,18 +417,18 @@ int main(int argc, const char **argv) {
         ArgumentInsertPosition::BEGIN));
 
 //    set<string> names = { "myHareSampleItem" };
+    RaiiStdioFile f(!OutputFilename.empty() ? fopen(OutputFilename.c_str(), "wb") : stdout);
 
-    StringRef fname = !OutputFilename.empty() ? OutputFilename.c_str() : "-";
+//    StringRef fname = !OutputFilename.empty() ? OutputFilename.c_str() : "-";
 
-    std::error_code EC;
-    raw_fd_ostream OS(fname, EC, sys::fs::F_None);
+//    std::error_code EC;
+//    raw_fd_ostream OS(fname, EC, sys::fs::F_None);
 
     //EC = sys::fs::openFileForWrite(Filename, FD, Flags);
-    if (EC) {
-        errs() << "Failed to open output file '" << fname << "'\n"
-            << EC.message() << "\n";
+    if (!f) {
+        errs() << "Failed to open output file '" << OutputFilename.c_str() << "'\n";
         return 1;
     }
 
-    return tool.run(new FindNamedClassActionFactory(OS));
+    return tool.run(new FindNamedClassActionFactory(f));
 }

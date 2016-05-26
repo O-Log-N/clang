@@ -27,12 +27,12 @@ using namespace llvm;
 class DbgDumpWalker
 {
 public:
-    raw_ostream& os;
+    OStream& os;
     bool printLocation;
     size_t offset;
     vector<string> offsets;
 
-    DbgDumpWalker(raw_ostream& os, bool printLocation) : os(os), printLocation(printLocation), offset(0)
+    DbgDumpWalker(OStream& os, bool printLocation) : os(os), printLocation(printLocation), offset(0)
     {
         offsets.push_back("");
     }
@@ -251,13 +251,18 @@ private:
 
 
     void dbgWrite(const string& text) {
-        os << getOffset() << text << "\n";
+        os.write_string(getOffset());
+        os.write_string(text);
+        os.write_string("\n");
     }
 
     void dbgWriteWithLocation(const Location& location, const string& text) {
         if (printLocation) {
-            string l = locationToString(location);
-            os << getOffset() << text << " " << l << "\n";
+            os.write_string(getOffset());
+            os.write_string(text);
+            os.write_string(" ");
+            os.write_string(locationToString(location));
+            os.write_string("\n");
         }
         else
             dbgWrite(text);
@@ -282,7 +287,7 @@ private:
     }
 };
 
-void dbgDumpTree(const Root* root, bool printLocation, raw_ostream& os)
+void dbgDumpTree(const Root* root, bool printLocation, OStream& os)
 {
     HAREASSERT(root);
 

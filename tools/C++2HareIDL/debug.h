@@ -18,10 +18,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef DEBUG_H_INCLUDED
 #define DEBUG_H_INCLUDED
 
-#include "llvm/Support/raw_ostream.h"
+#include "front-back/idl_tree_serializer.h"
 
 class Root;
 
-void dbgDumpTree(const Root* root, bool printLocation, llvm::raw_ostream& os);
+void dbgDumpTree(const Root* root, bool printLocation, OStream& os);
 
 #endif // DEBUG_H_INCLUDED
