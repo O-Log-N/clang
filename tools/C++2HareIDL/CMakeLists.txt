@@ -4,13 +4,13 @@ set( LLVM_LINK_COMPONENTS
   Support
   )
 
+set(HARE_IDL_DIR "../../../../../Hare-IDL")
+
 add_clang_executable(C++2HareIDL
   C++2HareIDL.cpp
   debug.h
   debug.cpp
   )
-
-set(HARE_IDL_DIR "../../../../../Hare-IDL")
 
 target_include_directories(C++2HareIDL PRIVATE ${HARE_IDL_DIR}/src)
 

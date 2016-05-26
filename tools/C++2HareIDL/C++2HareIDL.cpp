@@ -15,6 +15,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 *******************************************************************************/
 
+#include <sstream>
 
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
@@ -27,6 +28,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "front-back/idl_tree.h"
 #include "debug.h"
+
 
 using namespace clang;
 using namespace clang::tooling;
@@ -60,6 +62,14 @@ FindByAttribute("find-by-attribute", cl::desc("Process classes with attribute [[
 static cl::opt<std::string>
 OutputFilename("o", cl::desc("Output filename"), cl::value_desc("filename"), cl::cat(myToolCategory));
 
+static cl::opt<bool>
+Print("print", cl::desc("Generate an idl tree and print to cout.\n"),
+    cl::cat(myToolCategory));
+
+static cl::opt<bool>
+Serialize("serialize", cl::desc("Generate an idl tree and serialize it.\n"),
+    cl::cat(myToolCategory));
+
 
 class FindNamedClassVisitor
     : public RecursiveASTVisitor<FindNamedClassVisitor> {
@@ -67,13 +77,17 @@ private:
     ASTContext *context;
     map<const Type*, string> typeMapping;
     Root root;
+    ostringstream os;
 
 public:
     explicit FindNamedClassVisitor(ASTContext *context)
         : context(context) {}
 
-    void SerializeTree(raw_ostream& os) {
-        dbgDumpTree(&root, true, os);
+    void SerializeTree(raw_ostream& stream) {
+        if (Print || Serialize)
+            dbgDumpTree(&root, true, stream);
+        else
+            stream << os.str();
     }
 
     bool VisitTypedefNameDecl(TypedefNameDecl* declaration) {
@@ -129,6 +143,13 @@ public:
 
 private:
     void addMapping(CXXRecordDecl *declaration, const string& name) {
+        if (Print || Serialize)
+            addMappingTree(declaration, name);
+        else
+            addMappingIdl(declaration, name);
+    }
+
+    void addMappingTree(CXXRecordDecl *declaration, const string& name) {
 
 //        declaration->dump();
         unique_ptr<Structure> str(new Structure);
@@ -227,6 +248,114 @@ private:
         location.fileName = fullLoc.getManager().getFilename(fullLoc).str();
 
         return location;
+    }
+
+    void addMappingIdl(CXXRecordDecl *declaration, const string& name) {
+
+        //        declaration->dump();
+
+        FullSourceLoc fullLocation = context->getFullLoc(declaration->getLocStart());
+        string fn = fullLocation.getManager().getFilename(fullLocation).str();
+        unsigned int line = fullLocation.getSpellingLineNumber();
+        os << "#line " << line << " \"" << fn << "\";\n";
+
+        string mappingArgs;
+        if (declaration->hasAttr<HareMappingAttr>()) {
+            HareMappingAttr* at = declaration->getAttr<HareMappingAttr>();
+            StringRef ma = at->getArgument();
+            if (!ma.empty()) {
+                mappingArgs += ", Attribute=\"";
+                mappingArgs += ma;
+                mappingArgs += "\" ";
+            }
+        }
+
+        os << "MAPPING( FrontEnd=\"1.0\"" << mappingArgs << ") PUBLISHABLE-STRUCT " << name << " {\n";
+        ++line;
+
+        RecordDecl::field_range r = declaration->fields();
+        for (auto it = r.begin(); it != r.end(); ++it) {
+            FieldDecl* current = *it;
+            string n = current->getDeclName().getAsString();
+            //                string t = current->getType().getCanonicalType().getAsString();
+            QualType qt = current->getType();
+
+            if (qt.hasQualifiers()) {
+                //TODO report error?
+                qt = qt.getUnqualifiedType();
+            }
+
+            const Type* t = qt.getCanonicalType().getTypePtrOrNull();
+            auto mapIt = typeMapping.find(t);
+            string typeName = mapIt != typeMapping.end() ? mapIt->second : qt.getAsString();
+
+            FullSourceLoc currentLoc = context->getFullLoc(current->getLocStart());
+            fixLineNumber(fn, line, currentLoc);
+
+            os << typeName << " ";
+            //assert(t);
+            if (t->isEnumeralType()) {
+                EnumDecl* ed = t->getAs<EnumType>()->getDecl();
+                auto r = ed->enumerators();
+                if (r.begin() != r.end()) {
+                    os << "{";
+                    for (auto it = r.begin(); it != r.end(); ++it) {
+                        if (it != r.begin())
+                            os << ",";
+
+                        os << it->getName().str();
+                        os << "=";
+                        os << it->getInitVal().toString(10);
+                    }
+                    os << "} ";
+                }
+            }
+
+            os << current->getDeclName().getAsString() << ";\n";
+            ++line;
+            /*
+            if (current->hasAttr<HareEncodeAsAttr>()) {
+            HareEncodeAsAttr* at = current->getAttr<HareEncodeAsAttr>();
+            llvm::outs() << t.getAsString() << " " << n << " " << at->getEncoding().str() << ";\n";
+            }
+            else if (current->hasAttr<AnnotateAttr>()) {
+            AnnotateAttr* at = current->getAttr<AnnotateAttr>();
+            StringRef anot = at->getAnnotation();
+            if (anot.startswith("hare::encode_as(")) {
+            llvm::outs() << t.getAsString() << " " << n << " " << anot << ";\n";
+            }
+            }
+            else
+            */
+        }
+        os << "};\n\n";
+    }
+
+    void fixLineNumber(string& fileName, unsigned int& line, FullSourceLoc location) {
+        unsigned int currentLine = location.getSpellingLineNumber();
+        StringRef currentFileName = location.getManager().getFilename(location);
+
+        if (fileName != currentFileName) {
+            fileName = currentFileName;
+            line = currentLine;
+            os << "#line " << line << " \"" << fileName << "\";\n";
+        }
+        else {
+
+            if (currentLine != line) {
+                if (currentLine > line && currentLine - line < 10) {
+                    while (currentLine != line) {
+                        os << "\n";
+                        ++line;
+                    }
+                }
+                else {
+                    line = currentLine;
+                    os << "#line " << line << ";\n";
+                }
+            }
+        }
+
     }
 
 };
