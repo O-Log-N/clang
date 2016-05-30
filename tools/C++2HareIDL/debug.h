@@ -18,10 +18,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef DEBUG_H_INCLUDED
 #define DEBUG_H_INCLUDED
 
-#include "front-back/idl_tree_serializer.h"
+#include <stdio.h>
 
 class Root;
 
-void dbgDumpTree(const Root* root, bool printLocation, OStream& os);
+void dbgDumpTree(const Root* root, bool printLocation, FILE* os);
 
 #endif // DEBUG_H_INCLUDED

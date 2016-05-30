@@ -72,6 +72,9 @@ static cl::opt<bool>
 Serialize("serialize", cl::desc("Generate an idl tree and serialize it.\n"),
     cl::cat(myToolCategory));
 
+static cl::opt<bool>
+Dump("dump", cl::desc("Generate an idl tree and dump it.\n"),
+    cl::cat(myToolCategory));
 
 class FindNamedClassVisitor
     : public RecursiveASTVisitor<FindNamedClassVisitor> {
@@ -88,6 +91,9 @@ public:
     void SerializeTree(FILE* ostream) {
         if (Print)
             printRoot(root);
+        else if (Dump) {
+            dbgDumpTree(&root, true, ostream);
+        }
         else if (Serialize) {
             OStream OS(ostream);
             serializeRoot(root, OS);
@@ -151,7 +157,7 @@ public:
 
 private:
     void addMapping(CXXRecordDecl *declaration, const string& name) {
-        if (Print || Serialize)
+        if (Print || Serialize || Dump)
             addMappingTree(declaration, name);
         else
             addMappingIdl(declaration, name);
@@ -161,6 +167,13 @@ private:
 
 //        declaration->dump();
         unique_ptr<Structure> str(new Structure);
+        //PrintingPolicy pol(context->getLangOpts());
+        //pol.SuppressTagKeyword = true;
+//        pol.SuppressTag = true;
+//        pol.SuppressScope = true;
+//        pol.SuppressUnwrittenScope = true;
+
+
 
         str->name = name;
         str->declType = Structure::MAPPING;
@@ -188,46 +201,10 @@ private:
 
             dm->location = getLocation(current->getLocStart());
 
-            string currentName = current->getDeclName().getAsString();
-
-            dm->name = currentName;
-//                string t = current->getType().getCanonicalType().getAsString();
+            dm->name = current->getDeclName().getAsString();
+            
             QualType qt = current->getType();
-
-            if (qt.hasQualifiers()) {
-                //TODO report error?
-                qt = qt.getUnqualifiedType();
-            }
-
-            const Type* t = qt.getCanonicalType().getTypePtrOrNull();
-            auto mapIt = typeMapping.find(t);
-            string typeName = mapIt != typeMapping.end() ? mapIt->second : qt.getAsString();
-
-            dm->type.mappingName = typeName;
-
-            //assert(t);
-            if (t->isEnumeralType()) {
-
-                dm->type.kind = DataType::ENUM;
-
-                EnumDecl* ed = t->getAs<EnumType>()->getDecl();
-                auto r = ed->enumerators();
-                if (r.begin() != r.end()) {
-                    for (auto it = r.begin(); it != r.end(); ++it) {
-                        
-                        const APSInt& val = it->getInitVal();
-                        typedef decltype(dm->type.enumValues)::value_type::second_type st;
-                        if (val >= numeric_limits<st>::min() && val <= numeric_limits<st>::max()) {
-                            dm->type.enumValues[it->getName()] = static_cast<st>(val.getExtValue());
-                        }
-//                        else
-//                            reportError();
-                    }
-                }
-            }
-            else {
-                dm->type.kind = DataType::MAPPING_SPECIFIC;
-            }
+            dm->type = std::move(processType(qt));
 
             str->members.emplace_back(dm.release());
             /*
@@ -246,6 +223,81 @@ private:
 */
         }
         root.structures.push_back(std::move(str));
+    }
+
+    DataType processType(QualType qt) const {
+
+        DataType dt;
+
+        if (qt.hasQualifiers())
+            qt = qt.getUnqualifiedType();
+
+        if (!qt.isCanonical())
+            qt = qt.getCanonicalType();
+
+        const Type* t = qt.getTypePtrOrNull();
+        auto mapIt = typeMapping.find(t);
+        string typeName = mapIt != typeMapping.end() ? mapIt->second : qt.getAsString();
+
+        if (t->isEnumeralType()) {
+
+            dt.kind = DataType::ENUM;
+
+            EnumDecl* ed = t->getAs<EnumType>()->getDecl();
+            auto r = ed->enumerators();
+            if (r.begin() != r.end()) {
+                for (auto it = r.begin(); it != r.end(); ++it) {
+
+                    const APSInt& val = it->getInitVal();
+                    typedef decltype(dt.enumValues)::value_type::second_type st;
+                    if (val >= numeric_limits<st>::min() && val <= numeric_limits<st>::max()) {
+                        dt.enumValues[it->getName()] = static_cast<st>(val.getExtValue());
+                    }
+                    //                        else
+                    //                            reportError();
+                }
+            }
+        }
+        //            else if (t->isRecordType()) {
+        else if (beginsWith(typeName, "class std::vector<")) {
+            const RecordType *rt = t->getAs<RecordType>();
+            RecordDecl* decl = rt->getDecl();
+
+            ClassTemplateSpecializationDecl* tDecl = cast<ClassTemplateSpecializationDecl>(decl);
+            const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
+            const TemplateArgument& arg0 = args.get(0);
+            QualType qt0 = arg0.getAsType();
+
+            dt.kind = DataType::SEQUENCE;
+
+
+            dt.paramType.reset(new DataType(processType(qt0)));
+        }
+        else if (beginsWith(typeName, "class std::map<")) {
+            const RecordType *rt = t->getAs<RecordType>();
+            RecordDecl* decl = rt->getDecl();
+
+            ClassTemplateSpecializationDecl* tDecl = cast<ClassTemplateSpecializationDecl>(decl);
+            const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
+
+            QualType qt0 = args.get(0).getAsType();
+            QualType qt1 = args.get(1).getAsType();
+
+            dt.kind = DataType::DICTIONARY;
+
+            dt.keyType.reset(new DataType(processType(qt0)));
+            dt.paramType.reset(new DataType(processType(qt1)));
+        }
+        else if (beginsWith(typeName, "class std::basic_string<char,")) {
+            dt.kind = DataType::MAPPING_SPECIFIC;
+            dt.mappingName = "string";
+        }
+        else {
+            dt.kind = DataType::MAPPING_SPECIFIC;
+            dt.mappingName = typeName;
+        }
+
+        return dt;
     }
 
     Location getLocation(const SourceLocation& loc) const {
@@ -366,6 +418,9 @@ private:
 
     }
 
+    static bool beginsWith(const string& name, const string& prefix) {
+        return name.substr(0, prefix.size()) == prefix;
+    }
 };
 
 class FindNamedClassConsumer : public ASTConsumer {

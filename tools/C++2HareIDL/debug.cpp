@@ -18,21 +18,20 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "debug.h"
 
 #include "front-back/idl_tree.h"
-#include "llvm/Support/Casting.h"
+#include "front-back/idl_tree_serializer.h"
 
 using namespace std;
-using namespace llvm;
 
 
 class DbgDumpWalker
 {
 public:
-    OStream& os;
+    FILE* os;
     bool printLocation;
     size_t offset;
     vector<string> offsets;
 
-    DbgDumpWalker(OStream& os, bool printLocation) : os(os), printLocation(printLocation), offset(0)
+    DbgDumpWalker(FILE* os, bool printLocation) : os(os), printLocation(printLocation), offset(0)
     {
         offsets.push_back("");
     }
@@ -251,18 +250,15 @@ private:
 
 
     void dbgWrite(const string& text) {
-        os.write_string(getOffset());
-        os.write_string(text);
-        os.write_string("\n");
+        string offset = getOffset();
+        fprintf(os, "%s%s\n", offset.c_str(), text.c_str());
     }
 
     void dbgWriteWithLocation(const Location& location, const string& text) {
         if (printLocation) {
-            os.write_string(getOffset());
-            os.write_string(text);
-            os.write_string(" ");
-            os.write_string(locationToString(location));
-            os.write_string("\n");
+            string offset = getOffset();
+            string loc = locationToString(location);
+            fprintf(os, "%s%s %s\n", offset.c_str(), text.c_str(), loc.c_str());
         }
         else
             dbgWrite(text);
@@ -287,7 +283,7 @@ private:
     }
 };
 
-void dbgDumpTree(const Root* root, bool printLocation, OStream& os)
+void dbgDumpTree(const Root* root, bool printLocation, FILE* os)
 {
     HAREASSERT(root);
 
