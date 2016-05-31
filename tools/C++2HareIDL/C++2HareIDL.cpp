@@ -83,10 +83,14 @@ private:
     map<const Type*, string> typeMapping;
     Root root;
     ostringstream os;
+    PrintingPolicy policy;
+
 
 public:
     explicit FindNamedClassVisitor(ASTContext *context)
-        : context(context) {}
+        : context(context), policy(context->getLangOpts()) {
+        policy.SuppressTagKeyword = true;
+    }
 
     void SerializeTree(FILE* ostream) {
         if (Print)
@@ -203,10 +207,9 @@ private:
 
             dm->name = current->getDeclName().getAsString();
             
-            QualType qt = current->getType();
-            dm->type = std::move(processType(qt));
-
-            str->members.emplace_back(dm.release());
+            bool flag = processType(dm->type, current->getType());
+            if(flag)
+                str->members.emplace_back(dm.release());
             /*
             if (current->hasAttr<HareEncodeAsAttr>()) {
                 HareEncodeAsAttr* at = current->getAttr<HareEncodeAsAttr>();
@@ -225,9 +228,7 @@ private:
         root.structures.push_back(std::move(str));
     }
 
-    DataType processType(QualType qt) const {
-
-        DataType dt;
+    bool processType(DataType& dt, QualType qt) const {
 
         if (qt.hasQualifiers())
             qt = qt.getUnqualifiedType();
@@ -235,11 +236,16 @@ private:
         if (!qt.isCanonical())
             qt = qt.getCanonicalType();
 
-        const Type* t = qt.getTypePtrOrNull();
-        auto mapIt = typeMapping.find(t);
-        string typeName = mapIt != typeMapping.end() ? mapIt->second : qt.getAsString();
 
-        if (t->isEnumeralType()) {
+        string typeName = qt.getAsString(policy);
+        const Type* t = qt.getTypePtrOrNull();
+        
+        auto mapIt = typeMapping.find(t);
+        if (mapIt != typeMapping.end()) {
+            dt.kind = DataType::MAPPING_SPECIFIC;
+            dt.mappingName = mapIt->second;
+        }
+        else if (t->isEnumeralType()) {
 
             dt.kind = DataType::ENUM;
 
@@ -253,65 +259,62 @@ private:
                     if (val >= numeric_limits<st>::min() && val <= numeric_limits<st>::max()) {
                         dt.enumValues[it->getName()] = static_cast<st>(val.getExtValue());
                     }
-                    //                        else
-                    //                            reportError();
+                    else {
+                        errs() << "Enumeral value out of range " << val << "\n";
+                    }
                 }
             }
         }
-        //            else if (t->isRecordType()) {
-        else if (beginsWith(typeName, "class std::vector<")) {
+        else if (t->isRecordType()) {
             const RecordType *rt = t->getAs<RecordType>();
             RecordDecl* decl = rt->getDecl();
+            if (beginsWith(typeName, "std::vector<")) {
 
-            ClassTemplateSpecializationDecl* tDecl = cast<ClassTemplateSpecializationDecl>(decl);
-            const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
-            const TemplateArgument& arg0 = args.get(0);
-            QualType qt0 = arg0.getAsType();
+                ClassTemplateSpecializationDecl* tDecl = cast<ClassTemplateSpecializationDecl>(decl);
+                const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
 
-            dt.kind = DataType::SEQUENCE;
+                dt.kind = DataType::SEQUENCE;
 
+                dt.paramType.reset(new DataType());
+                if (!processType(*dt.paramType, args.get(0).getAsType()))
+                    return false;
+            }
+            else if (beginsWith(typeName, "std::map<")) {
 
-            dt.paramType.reset(new DataType(processType(qt0)));
+                ClassTemplateSpecializationDecl* tDecl = cast<ClassTemplateSpecializationDecl>(decl);
+                const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
+
+                dt.kind = DataType::DICTIONARY;
+
+                dt.keyType.reset(new DataType());
+                if (!processType(*dt.keyType, args.get(0).getAsType()))
+                    return false;
+
+                dt.paramType.reset(new DataType());
+                if (!processType(*dt.paramType, args.get(1).getAsType()))
+                    return false;
+            }
+            else {
+                dt.kind = DataType::MAPPING_SPECIFIC;
+                dt.mappingName = "class";
+
+                dt.mappingAttrs.emplace("className", Variant(typeName));
+            }
         }
-        else if (beginsWith(typeName, "class std::map<")) {
-            const RecordType *rt = t->getAs<RecordType>();
-            RecordDecl* decl = rt->getDecl();
-
-            ClassTemplateSpecializationDecl* tDecl = cast<ClassTemplateSpecializationDecl>(decl);
-            const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
-
-            QualType qt0 = args.get(0).getAsType();
-            QualType qt1 = args.get(1).getAsType();
-
-            dt.kind = DataType::DICTIONARY;
-
-            dt.keyType.reset(new DataType(processType(qt0)));
-            dt.paramType.reset(new DataType(processType(qt1)));
-        }
-        //else if (beginsWith(typeName, "class std::basic_string<char,")) {
-        //    dt.kind = DataType::MAPPING_SPECIFIC;
-        //    dt.mappingName = "string";
-        //}
-        else if (beginsWith(typeName, "class ")) {
-
-            dt.kind = DataType::MAPPING_SPECIFIC;
-            dt.mappingName = "class";
-
-            dt.mappingAttrs.emplace("className", Variant(typeName.substr(6)));
-        }
-        else if (beginsWith(typeName, "struct ")) {
-
-            dt.kind = DataType::MAPPING_SPECIFIC;
-            dt.mappingName = "class";
-
-            dt.mappingAttrs.emplace("className", Variant(typeName.substr(7)));
-        }
-        else {
+        else if(t->isBuiltinType()) {
             dt.kind = DataType::MAPPING_SPECIFIC;
             dt.mappingName = typeName;
         }
+        else if (t->isPointerType()) {
+            errs() << "Unsupported pointer type " << typeName << "\n";
+            return false;
+        }
+        else {
+            errs() << "Unsupported type " << typeName << "\n";
+            return false;
+        }
 
-        return dt;
+        return true;
     }
 
     Location getLocation(const SourceLocation& loc) const {
