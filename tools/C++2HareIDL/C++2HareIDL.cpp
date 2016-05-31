@@ -92,7 +92,7 @@ public:
         if (Print)
             printRoot(root);
         else if (Dump) {
-            dbgDumpTree(&root, true, ostream);
+            dbgDumpTree(&root, false, ostream);
         }
         else if (Serialize) {
             OStream OS(ostream);
@@ -288,9 +288,23 @@ private:
             dt.keyType.reset(new DataType(processType(qt0)));
             dt.paramType.reset(new DataType(processType(qt1)));
         }
-        else if (beginsWith(typeName, "class std::basic_string<char,")) {
+        //else if (beginsWith(typeName, "class std::basic_string<char,")) {
+        //    dt.kind = DataType::MAPPING_SPECIFIC;
+        //    dt.mappingName = "string";
+        //}
+        else if (beginsWith(typeName, "class ")) {
+
             dt.kind = DataType::MAPPING_SPECIFIC;
-            dt.mappingName = "string";
+            dt.mappingName = "class";
+
+            dt.mappingAttrs.emplace("className", Variant(typeName.substr(6)));
+        }
+        else if (beginsWith(typeName, "struct ")) {
+
+            dt.kind = DataType::MAPPING_SPECIFIC;
+            dt.mappingName = "class";
+
+            dt.mappingAttrs.emplace("className", Variant(typeName.substr(7)));
         }
         else {
             dt.kind = DataType::MAPPING_SPECIFIC;
