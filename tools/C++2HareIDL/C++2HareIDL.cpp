@@ -76,6 +76,10 @@ static cl::opt<bool>
 Dump("dump", cl::desc("Generate an idl tree and dump it.\n"),
     cl::cat(myToolCategory));
 
+static cl::opt<bool>
+Idl("idl", cl::desc("Write an idl tree.\n"),
+    cl::cat(myToolCategory));
+
 class FindNamedClassVisitor
     : public RecursiveASTVisitor<FindNamedClassVisitor> {
 private:
@@ -93,18 +97,22 @@ public:
     }
 
     void SerializeTree(FILE* ostream) {
-        if (Print)
-            printRoot(root);
-        else if (Dump) {
-            dbgDumpTree(&root, false, ostream);
+        if (Dump) {
+            dbgDumpTree(&root, false, ostream ? ostream : stdout);
         }
-        else if (Serialize) {
+        else if (Idl){
+            string buffer = os.str();
+            fwrite(buffer.c_str(), buffer.size(), 1, ostream ? ostream : stdout);
+        }
+        else if (Print) {
+            printRoot(root);
+        }
+        else if (ostream) {
             OStream OS(ostream);
             serializeRoot(root, OS);
         }
         else {
-            string buffer = os.str();
-            fwrite(buffer.c_str(), buffer.size(), 1, ostream);
+            printRoot(root);
         }
     }
 
@@ -161,23 +169,16 @@ public:
 
 private:
     void addMapping(CXXRecordDecl *declaration, const string& name) {
-        if (Print || Serialize || Dump)
-            addMappingTree(declaration, name);
-        else
+        if (Idl)
             addMappingIdl(declaration, name);
+        else
+            addMappingTree(declaration, name);
     }
 
     void addMappingTree(CXXRecordDecl *declaration, const string& name) {
 
 //        declaration->dump();
         unique_ptr<Structure> str(new Structure);
-        //PrintingPolicy pol(context->getLangOpts());
-        //pol.SuppressTagKeyword = true;
-//        pol.SuppressTag = true;
-//        pol.SuppressScope = true;
-//        pol.SuppressUnwrittenScope = true;
-
-
 
         str->name = name;
         str->declType = Structure::MAPPING;
@@ -200,7 +201,7 @@ private:
         RecordDecl::field_range r = declaration->fields();
         for (auto it = r.begin(); it != r.end(); ++it) {
 
-            unique_ptr<DataMember> dm(new DataMember());
+            unique_ptr<DataMember> dm(new DataMember);
             FieldDecl* current = *it;
 
             dm->location = getLocation(current->getLocStart());
@@ -245,6 +246,10 @@ private:
             dt.kind = DataType::MAPPING_SPECIFIC;
             dt.mappingName = mapIt->second;
         }
+        else if (t->isBuiltinType()) {
+            dt.kind = DataType::MAPPING_SPECIFIC;
+            dt.mappingName = typeName;
+        }
         else if (t->isEnumeralType()) {
 
             dt.kind = DataType::ENUM;
@@ -268,7 +273,7 @@ private:
         else if (t->isRecordType()) {
             const RecordType *rt = t->getAs<RecordType>();
             RecordDecl* decl = rt->getDecl();
-            if (beginsWith(typeName, "std::vector<")) {
+            if (beginsWith(typeName, "std::vector<") || beginsWith(typeName, "std::list<")) {
 
                 ClassTemplateSpecializationDecl* tDecl = cast<ClassTemplateSpecializationDecl>(decl);
                 const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
@@ -300,10 +305,6 @@ private:
 
                 dt.mappingAttrs.emplace("className", Variant(typeName));
             }
-        }
-        else if(t->isBuiltinType()) {
-            dt.kind = DataType::MAPPING_SPECIFIC;
-            dt.mappingName = typeName;
         }
         else if (t->isPointerType()) {
             errs() << "Unsupported pointer type " << typeName << "\n";
@@ -380,8 +381,7 @@ private:
                         if (it != r.begin())
                             os << ",";
 
-                        os << it->getName().str();
-                        os << "=";
+                        os << "IDENTIFIER( \"" << it->getName().str() << "\" ) = ";
                         os << it->getInitVal().toString(10);
                     }
                     os << "} ";
@@ -474,7 +474,7 @@ public:
 
 int main(int argc, const char **argv) {
 
-//    InitializeAllTargets();
+    //    InitializeAllTargets();
     LLVMInitializeX86TargetInfo();
     LLVMInitializeX86TargetMC();
     LLVMInitializeX86AsmParser();
@@ -488,16 +488,8 @@ int main(int argc, const char **argv) {
     tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(extraArgs,
         ArgumentInsertPosition::BEGIN));
 
-//    set<string> names = { "myHareSampleItem" };
-    RaiiStdioFile f(!OutputFilename.empty() ? fopen(OutputFilename.c_str(), "wb") : stdout);
-
-//    StringRef fname = !OutputFilename.empty() ? OutputFilename.c_str() : "-";
-
-//    std::error_code EC;
-//    raw_fd_ostream OS(fname, EC, sys::fs::F_None);
-
-    //EC = sys::fs::openFileForWrite(Filename, FD, Flags);
-    if (!f) {
+    RaiiStdioFile f(!OutputFilename.empty() ? fopen(OutputFilename.c_str(), "wb") : nullptr);
+    if (!OutputFilename.empty() && !f) {
         errs() << "Failed to open output file '" << OutputFilename.c_str() << "'\n";
         return 1;
     }
