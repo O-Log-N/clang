@@ -85,6 +85,9 @@ class FindNamedClassVisitor
 private:
     ASTContext *context;
     map<const Type*, string> typeMapping;
+    map<const ClassTemplateDecl*, string> sequenceType;
+    map<const ClassTemplateDecl*, string> dictionaryType;
+    vector<pair<const CXXRecordDecl *, string> > toBeMapped; //need to keep order?
     Root root;
     ostringstream os;
     PrintingPolicy policy;
@@ -97,6 +100,8 @@ public:
     }
 
     void SerializeTree(FILE* ostream) {
+        doMapping();
+
         if (Dump) {
             dbgDumpTree(&root, false, ostream ? ostream : stdout);
         }
@@ -116,26 +121,26 @@ public:
         }
     }
 
-    bool VisitTypeAliasDecl(TypeAliasDecl* declaration) {
+    //bool VisitTypeAliasDecl(TypeAliasDecl* declaration) {
 
-        StringRef name = declaration->getName();
-        if (name.substr(0, 14) == "hare_sequence_") {
-            QualType qt = declaration->getUnderlyingType();
-            const Type* t = qt.getCanonicalType().getTypePtrOrNull();
-            if (t) {
-                const TemplateSpecializationType* ts = t->getAs<TemplateSpecializationType>();
-                QualType qt2 = ts->desugar();
-                const Type* t2 = qt2.getCanonicalType().getTypePtrOrNull();
-                if (t2) {
-                    t->dump();
-                    t2->dump();
+    //    StringRef name = declaration->getName();
+    //    if (name.substr(0, 14) == "hare_sequence_") {
+    //        QualType qt = declaration->getUnderlyingType();
+    //        const Type* t = qt.getCanonicalType().getTypePtrOrNull();
+    //        if (t) {
+    //            const TemplateSpecializationType* ts = t->getAs<TemplateSpecializationType>();
+    //            QualType qt2 = ts->desugar();
+    //            const Type* t2 = qt2.getCanonicalType().getTypePtrOrNull();
+    //            if (t2) {
+    //                t->dump();
+    //                t2->dump();
 
-                }
-            }
-        }
+    //            }
+    //        }
+    //    }
 
-        return true;
-    }
+    //    return true;
+    //}
 
     bool VisitTypedefNameDecl(TypedefNameDecl* declaration) {
 
@@ -146,12 +151,25 @@ public:
             const Type* t = qt.getCanonicalType().getTypePtrOrNull();
             if (t && t->isRecordType()) {
                 const RecordType *rt = t->getAs<RecordType>();
-                RecordDecl* decl = rt->getDecl();
-
-                ClassTemplateSpecializationDecl* ct = dyn_cast<ClassTemplateSpecializationDecl>(decl);
-                ct->dump();
-                if (ct) {
-                    ClassTemplateDecl* cd = ct->getSpecializedTemplate();
+                RecordDecl* rDecl = rt->getDecl();
+                ClassTemplateSpecializationDecl* ctsDecl = dyn_cast<ClassTemplateSpecializationDecl>(rDecl);
+                if (ctsDecl) {
+                    ClassTemplateDecl* ctDecl = ctsDecl->getSpecializedTemplate();
+                    sequenceType.emplace(ctDecl, n);
+                }
+            }
+        }
+        else if (name.substr(0, 16) == "hare_dictionary_") {
+            string n = declaration->getDeclName().getAsString().substr(16);
+            QualType qt = declaration->getUnderlyingType();
+            const Type* t = qt.getCanonicalType().getTypePtrOrNull();
+            if (t && t->isRecordType()) {
+                const RecordType *rt = t->getAs<RecordType>();
+                RecordDecl* rDecl = rt->getDecl();
+                ClassTemplateSpecializationDecl* ctsDecl = dyn_cast<ClassTemplateSpecializationDecl>(rDecl);
+                if (ctsDecl) {
+                    ClassTemplateDecl* ctDecl = ctsDecl->getSpecializedTemplate();
+                    dictionaryType.emplace(ctDecl, n);
                 }
             }
         }
@@ -172,7 +190,7 @@ public:
                 if (t) {
                     CXXRecordDecl * d = t->getAsCXXRecordDecl();
                     if (d) {
-                        addMapping(d, name);
+                        toBeMapped.emplace_back(d, name);
                     }
                 }
             }
@@ -204,14 +222,19 @@ public:
     }
 
 private:
-    void addMapping(CXXRecordDecl *declaration, const string& name) {
+    void doMapping() {
+        for (auto each : toBeMapped)
+            addMapping(each.first, each.second);
+    }
+
+    void addMapping(const CXXRecordDecl *declaration, const string& name) {
         if (Idl)
             addMappingIdl(declaration, name);
         else
             addMappingTree(declaration, name);
     }
 
-    void addMappingTree(CXXRecordDecl *declaration, const string& name) {
+    void addMappingTree(const CXXRecordDecl *declaration, const string& name) {
 
 //        declaration->dump();
         unique_ptr<Structure> str(new Structure);
@@ -221,6 +244,14 @@ private:
         str->type = Structure::STRUCT;
 
         str->location = getLocation(declaration->getLocStart());
+
+        auto bases = declaration->bases();
+//        size_t sz = distance(bases.begin(), bases.end());
+
+        if (bases.begin() != bases.end()) {
+            QualType inherit = bases.begin()->getType();
+            str->inheritedFrom = inherit.getCanonicalType().getAsString(policy);
+        }
 
         string mappingArgs;
         if (declaration->hasAttr<HareMappingAttr>()) {
@@ -281,10 +312,12 @@ private:
         if (mapIt != typeMapping.end()) {
             dt.kind = DataType::MAPPING_SPECIFIC;
             dt.mappingName = mapIt->second;
+            return true;
         }
         else if (t->isBuiltinType()) {
             dt.kind = DataType::MAPPING_SPECIFIC;
             dt.mappingName = typeName;
+            return true;
         }
         else if (t->isEnumeralType()) {
 
@@ -302,73 +335,67 @@ private:
                     }
                     else {
                         errs() << "Enumeral value out of range " << val << "\n";
+                        return false;
                     }
                 }
             }
+            return true;
         }
         else if (t->isRecordType()) {
             const RecordType *rt = t->getAs<RecordType>();
             RecordDecl* decl = rt->getDecl();
-            if (beginsWith(typeName, "std::vector<")) {
 
-                ClassTemplateSpecializationDecl* tDecl = dyn_cast<ClassTemplateSpecializationDecl>(decl);
+            ClassTemplateSpecializationDecl* tDecl = dyn_cast<ClassTemplateSpecializationDecl>(decl);
+            if (tDecl) {
+                ClassTemplateDecl* ctDecl = tDecl->getSpecializedTemplate();
+                const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
 
-                tDecl->dump();
-                if (tDecl) {
-                    ClassTemplateDecl* cd = tDecl->getSpecializedTemplate();
+                auto it = sequenceType.find(ctDecl);
+                if (it != sequenceType.end()) {
+
+                    dt.kind = DataType::SEQUENCE;
+                    dt.name = it->second;
+
+                    dt.paramType.reset(new DataType());
+                    if (!processType(*dt.paramType, args.get(0).getAsType()))
+                        return false;
+
+                    return true;
                 }
 
-                const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
+                auto it2 = dictionaryType.find(ctDecl);
+                if (it2 != dictionaryType.end()){
 
-                dt.kind = DataType::SEQUENCE;
+                    dt.kind = DataType::DICTIONARY;
+                    dt.name = it2->second;
 
-                dt.paramType.reset(new DataType());
-                if (!processType(*dt.paramType, args.get(0).getAsType()))
-                    return false;
-            }
-            else if (beginsWith(typeName, "std::list<")) {
+                    dt.keyType.reset(new DataType());
+                    if (!processType(*dt.keyType, args.get(0).getAsType()))
+                        return false;
 
-                ClassTemplateSpecializationDecl* tDecl = cast<ClassTemplateSpecializationDecl>(decl);
-                const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
+                    dt.paramType.reset(new DataType());
+                    if (!processType(*dt.paramType, args.get(1).getAsType()))
+                        return false;
 
-                dt.kind = DataType::SEQUENCE;
-
-                dt.paramType.reset(new DataType());
-                if (!processType(*dt.paramType, args.get(0).getAsType()))
-                    return false;
-            }
-            else if (beginsWith(typeName, "std::map<")) {
-
-                ClassTemplateSpecializationDecl* tDecl = cast<ClassTemplateSpecializationDecl>(decl);
-                const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
-
-                dt.kind = DataType::DICTIONARY;
-
-                dt.keyType.reset(new DataType());
-                if (!processType(*dt.keyType, args.get(0).getAsType()))
-                    return false;
-
-                dt.paramType.reset(new DataType());
-                if (!processType(*dt.paramType, args.get(1).getAsType()))
-                    return false;
+                    return true;
+                }
             }
             else {
                 dt.kind = DataType::MAPPING_SPECIFIC;
                 dt.mappingName = "class";
 
                 dt.mappingAttrs.emplace("className", Variant(typeName));
+
+                return true;
             }
         }
         else if (t->isPointerType()) {
             errs() << "Unsupported pointer type " << typeName << "\n";
             return false;
         }
-        else {
-            errs() << "Unsupported type " << typeName << "\n";
-            return false;
-        }
 
-        return true;
+        errs() << "Unsupported type " << typeName << "\n";
+        return false;
     }
 
     Location getLocation(const SourceLocation& loc) const {
@@ -381,7 +408,7 @@ private:
         return location;
     }
 
-    void addMappingIdl(CXXRecordDecl *declaration, const string& name) {
+    void addMappingIdl(const CXXRecordDecl *declaration, const string& name) {
 
         //        declaration->dump();
 
