@@ -70,7 +70,7 @@ private:
             return fmt::format("( kind=STRING stringValue={} )", v.stringValue);
             break;
         default:
-            HAREASSERT(false);
+            return string("( *** INVALID *** )");
         }
 
     }
@@ -135,8 +135,7 @@ private:
             return dataType.name;
         case DataType::SEQUENCE:
         {
-            HAREASSERT(dataType.paramType);
-            string arg = dbgTypeToString(*dataType.paramType);
+            string arg = dataType.paramType ? dbgTypeToString(*dataType.paramType) : "( *** INVALID *** )";
             if (dataType.name.empty())
                 return fmt::format("SEQUENCE< {} >", arg);
             else
@@ -144,10 +143,8 @@ private:
         }
         case DataType::DICTIONARY:
         {
-            HAREASSERT(dataType.keyType);
-            HAREASSERT(dataType.paramType);
-            string arg0 = dbgTypeToString(*dataType.keyType);
-            string arg1 = dbgTypeToString(*dataType.paramType);
+            string arg0 = dataType.keyType ? dbgTypeToString(*dataType.keyType) : "*** INVALID ***";
+            string arg1 = dataType.paramType ? dbgTypeToString(*dataType.paramType) : "*** INVALID ***";
             return fmt::format("DICTIONARY< {} , {} >", arg0, arg1);
         }
         case DataType::ENCODING_SPECIFIC:
@@ -163,7 +160,7 @@ private:
                                dataType.mappingName, attrs);
         }
         default:
-            HAREASSERT(false);
+            return string("*** INVALID ***");
         }
     }
 
@@ -190,7 +187,7 @@ private:
             kind = "ENCODING";
             break;
         default:
-            HAREASSERT(false);
+            kind = "*** INVALID ***";
         }
 
         string type = "";
@@ -205,7 +202,7 @@ private:
             type = "DISCRIMINATED_UNION";
             break;
         default:
-            HAREASSERT(false);
+            type = "*** INVALID ***";
         }
 
         string tags = dbgAttributesToString(node->encodingSpecifics.attrs);
@@ -285,9 +282,9 @@ private:
 
 void dbgDumpTree(const Root* root, bool printLocation, FILE* os)
 {
-    HAREASSERT(root);
-
-    DbgDumpWalker walker(os, printLocation);
-    walker.dbgDumpRoot(root);
+    if (root) {
+        DbgDumpWalker walker(os, printLocation);
+        walker.dbgDumpRoot(root);
+    }
 }
 

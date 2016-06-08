@@ -116,10 +116,46 @@ public:
         }
     }
 
+    bool VisitTypeAliasDecl(TypeAliasDecl* declaration) {
+
+        StringRef name = declaration->getName();
+        if (name.substr(0, 14) == "hare_sequence_") {
+            QualType qt = declaration->getUnderlyingType();
+            const Type* t = qt.getCanonicalType().getTypePtrOrNull();
+            if (t) {
+                const TemplateSpecializationType* ts = t->getAs<TemplateSpecializationType>();
+                QualType qt2 = ts->desugar();
+                const Type* t2 = qt2.getCanonicalType().getTypePtrOrNull();
+                if (t2) {
+                    t->dump();
+                    t2->dump();
+
+                }
+            }
+        }
+
+        return true;
+    }
+
     bool VisitTypedefNameDecl(TypedefNameDecl* declaration) {
 
         StringRef name = declaration->getName();
-        if (name.substr(0, 5) == "hare_") {
+        if (name.substr(0, 14) == "hare_sequence_") {
+            string n = declaration->getDeclName().getAsString().substr(14);
+            QualType qt = declaration->getUnderlyingType();
+            const Type* t = qt.getCanonicalType().getTypePtrOrNull();
+            if (t && t->isRecordType()) {
+                const RecordType *rt = t->getAs<RecordType>();
+                RecordDecl* decl = rt->getDecl();
+
+                ClassTemplateSpecializationDecl* ct = dyn_cast<ClassTemplateSpecializationDecl>(decl);
+                ct->dump();
+                if (ct) {
+                    ClassTemplateDecl* cd = ct->getSpecializedTemplate();
+                }
+            }
+        }
+        else if (name.substr(0, 5) == "hare_") {
             string n = declaration->getDeclName().getAsString().substr(5);
             QualType qt = declaration->getUnderlyingType();
             const Type* t = qt.getCanonicalType().getTypePtrOrNull();
@@ -273,7 +309,24 @@ private:
         else if (t->isRecordType()) {
             const RecordType *rt = t->getAs<RecordType>();
             RecordDecl* decl = rt->getDecl();
-            if (beginsWith(typeName, "std::vector<") || beginsWith(typeName, "std::list<")) {
+            if (beginsWith(typeName, "std::vector<")) {
+
+                ClassTemplateSpecializationDecl* tDecl = dyn_cast<ClassTemplateSpecializationDecl>(decl);
+
+                tDecl->dump();
+                if (tDecl) {
+                    ClassTemplateDecl* cd = tDecl->getSpecializedTemplate();
+                }
+
+                const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
+
+                dt.kind = DataType::SEQUENCE;
+
+                dt.paramType.reset(new DataType());
+                if (!processType(*dt.paramType, args.get(0).getAsType()))
+                    return false;
+            }
+            else if (beginsWith(typeName, "std::list<")) {
 
                 ClassTemplateSpecializationDecl* tDecl = cast<ClassTemplateSpecializationDecl>(decl);
                 const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
