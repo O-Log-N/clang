@@ -322,6 +322,13 @@ private:
         else if (t->isEnumeralType()) {
 
             dt.kind = DataType::ENUM;
+            
+            //Workaround for qualified name enum
+            size_t l = typeName.find_last_of(':');
+            if (l != string::npos)
+                typeName = typeName.substr(l + 1);
+
+            dt.name = typeName;
 
             EnumDecl* ed = t->getAs<EnumType>()->getDecl();
             auto r = ed->enumerators();
@@ -355,10 +362,18 @@ private:
 
                     dt.kind = DataType::SEQUENCE;
                     dt.name = it->second;
+                    dt.mappingName = it->second;
 
                     dt.paramType.reset(new DataType());
                     if (!processType(*dt.paramType, args.get(0).getAsType()))
                         return false;
+
+                    //Workaround to match previous behaviour
+                    if (dt.paramType->kind == DataType::MAPPING_SPECIFIC) {
+                        errs() << "Fixig paramType->kind\n";
+                        dt.paramType->kind = DataType::NAMED_TYPE;
+                        dt.paramType->name = dt.paramType->mappingName;
+                    }
 
                     return true;
                 }
@@ -368,6 +383,7 @@ private:
 
                     dt.kind = DataType::DICTIONARY;
                     dt.name = it2->second;
+                    dt.mappingName = it2->second;
 
                     dt.keyType.reset(new DataType());
                     if (!processType(*dt.keyType, args.get(0).getAsType()))
@@ -377,14 +393,27 @@ private:
                     if (!processType(*dt.paramType, args.get(1).getAsType()))
                         return false;
 
+                    //Workaround to match previous behaviour
+                    if (dt.keyType->kind == DataType::MAPPING_SPECIFIC) {
+                        errs() << "Fixig keyType->kind\n";
+                        dt.keyType->kind = DataType::NAMED_TYPE;
+                        dt.keyType->name = dt.keyType->mappingName;
+                    }
+
+                    if (dt.paramType->kind == DataType::MAPPING_SPECIFIC) {
+                        errs() << "Fixig paramType->kind\n";
+                        dt.paramType->kind = DataType::NAMED_TYPE;
+                        dt.paramType->name = dt.paramType->mappingName;
+                    }
+
                     return true;
                 }
             }
             else {
                 dt.kind = DataType::MAPPING_SPECIFIC;
-                dt.mappingName = "class";
+                dt.mappingName = typeName;
 
-                dt.mappingAttrs.emplace("className", Variant(typeName));
+//                dt.mappingAttrs.emplace("className", Variant(typeName));
 
                 return true;
             }
@@ -445,14 +474,20 @@ private:
 
             const Type* t = qt.getCanonicalType().getTypePtrOrNull();
             auto mapIt = typeMapping.find(t);
-            string typeName = mapIt != typeMapping.end() ? mapIt->second : qt.getAsString();
+            string typeName = mapIt != typeMapping.end() ? mapIt->second : qt.getAsString(policy);
 
             FullSourceLoc currentLoc = context->getFullLoc(current->getLocStart());
             fixLineNumber(fn, line, currentLoc);
 
-            os << typeName << " ";
             //assert(t);
-            if (t->isEnumeralType()) {
+            if (t->isPointerType()) {
+                ; //ignore
+            }
+            else if (t->isEnumeralType()) {
+                size_t l = typeName.find_last_of(':');
+                if (l != string::npos)
+                    typeName = typeName.substr(l + 1);
+                os << "enum " << typeName << " ";
                 EnumDecl* ed = t->getAs<EnumType>()->getDecl();
                 auto r = ed->enumerators();
                 if (r.begin() != r.end()) {
@@ -467,6 +502,9 @@ private:
                     os << "} ";
                 }
             }
+            else
+                os << typeName << " ";
+
 
             os << current->getDeclName().getAsString() << ";\n";
             ++line;
