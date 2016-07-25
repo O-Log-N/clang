@@ -323,14 +323,9 @@ private:
 
             dt.kind = DataType::ENUM;
             
-            //Workaround for qualified name enum
-            size_t l = typeName.find_last_of(':');
-            if (l != string::npos)
-                typeName = typeName.substr(l + 1);
-
-            dt.name = typeName;
-
             EnumDecl* ed = t->getAs<EnumType>()->getDecl();
+            dt.name = ed->getQualifiedNameAsString();
+
             auto r = ed->enumerators();
             if (r.begin() != r.end()) {
                 for (auto it = r.begin(); it != r.end(); ++it) {
@@ -338,7 +333,8 @@ private:
                     const APSInt& val = it->getInitVal();
                     typedef decltype(dt.enumValues)::value_type::second_type st;
                     if (val >= numeric_limits<st>::min() && val <= numeric_limits<st>::max()) {
-                        dt.enumValues[it->getName()] = static_cast<st>(val.getExtValue());
+                        const string& valName = it->getQualifiedNameAsString();
+                        dt.enumValues[valName] = static_cast<st>(val.getExtValue());
                     }
                     else {
                         errs() << "Enumeral value out of range " << val << "\n";
