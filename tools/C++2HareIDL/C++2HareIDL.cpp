@@ -324,7 +324,7 @@ private:
             dt.kind = DataType::ENUM;
             
             EnumDecl* ed = t->getAs<EnumType>()->getDecl();
-            dt.name = ed->getQualifiedNameAsString();
+            dt.name = ed->getName();
 
             auto r = ed->enumerators();
             if (r.begin() != r.end()) {
@@ -333,7 +333,7 @@ private:
                     const APSInt& val = it->getInitVal();
                     typedef decltype(dt.enumValues)::value_type::second_type st;
                     if (val >= numeric_limits<st>::min() && val <= numeric_limits<st>::max()) {
-                        const string& valName = it->getQualifiedNameAsString();
+                        const string& valName = it->getName();
                         dt.enumValues[valName] = static_cast<st>(val.getExtValue());
                     }
                     else {
