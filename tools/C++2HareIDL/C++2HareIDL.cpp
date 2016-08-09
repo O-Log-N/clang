@@ -357,16 +357,23 @@ private:
                 if (it != sequenceType.end()) {
 
                     dt.kind = DataType::SEQUENCE;
+
                     dt.name = it->second;
                     dt.mappingName = it->second;
 
                     dt.paramType.reset(new DataType());
-                    if (!processType(*dt.paramType, args.get(0).getAsType()))
-                        return false;
-
+                    if (args.size() >= 2) {
+                        if (!processType(*dt.paramType, args.get(0).getAsType()))
+                            return false;
+                    }
+                    else {
+                        //vector<bool> specialization
+                        dt.paramType->kind = DataType::MAPPING_SPECIFIC;
+                        dt.paramType->mappingName = "bool";
+                    }
                     //Workaround to match previous behaviour
                     if (dt.paramType->kind == DataType::MAPPING_SPECIFIC) {
-                        errs() << "Fixig paramType->kind\n";
+                        errs() << "Fixig paramType->kind : " << dt.paramType->mappingName << "\n";
                         dt.paramType->kind = DataType::NAMED_TYPE;
                         dt.paramType->name = dt.paramType->mappingName;
                     }
@@ -391,13 +398,13 @@ private:
 
                     //Workaround to match previous behaviour
                     if (dt.keyType->kind == DataType::MAPPING_SPECIFIC) {
-                        errs() << "Fixig keyType->kind\n";
+                        errs() << "Fixig keyType->kind : " << dt.keyType->mappingName << "\n";
                         dt.keyType->kind = DataType::NAMED_TYPE;
                         dt.keyType->name = dt.keyType->mappingName;
                     }
 
                     if (dt.paramType->kind == DataType::MAPPING_SPECIFIC) {
-                        errs() << "Fixig paramType->kind\n";
+                        errs() << "Fixig paramType->kind : " << dt.paramType->mappingName << "\n";
                         dt.paramType->kind = DataType::NAMED_TYPE;
                         dt.paramType->name = dt.paramType->mappingName;
                     }
