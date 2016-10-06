@@ -97,6 +97,7 @@ public:
     explicit FindNamedClassVisitor(ASTContext *context)
         : context(context), policy(context->getLangOpts()) {
         policy.SuppressTagKeyword = true;
+        policy.Bool = true;
     }
 
     void SerializeTree(FILE* ostream) {
