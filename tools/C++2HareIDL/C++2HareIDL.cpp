@@ -80,48 +80,345 @@ static cl::opt<bool>
 Idl("idl", cl::desc("Write an idl tree.\n"),
     cl::cat(myToolCategory));
 
-class FindNamedClassVisitor
-    : public RecursiveASTVisitor<FindNamedClassVisitor> {
-private:
-    ASTContext *context;
+static cl::opt<bool>
+Dependencies("dependencies", cl::desc("Automatically process dependecy classes.\n"),
+    cl::cat(myToolCategory));
+
+
+void SerializeTree(FILE* ostream, Root& root) {
+
+    if (Dump) {
+    dbgDumpTree(&root, false, ostream ? ostream : stdout);
+    }
+    else if (Idl){
+    //string buffer = os.str();
+    //fwrite(buffer.c_str(), buffer.size(), 1, ostream ? ostream : stdout);
+    }
+    else if (Print) {
+    printRoot(root);
+    }
+    else if (ostream) {
+    OStream OS(ostream);
+    serializeRoot(root, OS);
+    }
+    else {
+    printRoot(root);
+    }
+}
+
+
+struct MappingData {
     map<const Type*, string> typeMapping;
     map<const ClassTemplateDecl*, string> sequenceType;
+    map<const ClassTemplateDecl*, string> owningPtrType;
     map<const ClassTemplateDecl*, string> dictionaryType;
-    vector<pair<const CXXRecordDecl *, string> > toBeMapped; //need to keep order?
-    Root root;
-    ostringstream os;
+};
+
+class RecursiveMapVisitor
+    : public RecursiveASTVisitor<RecursiveMapVisitor> {
+private:
+    ASTContext *context;
     PrintingPolicy policy;
+    const MappingData& md;
+    list<const CXXRecordDecl*>& toBeMapped; //better to keep order
+    set<const CXXRecordDecl*> alreadyMapped;
+    set<const CXXRecordDecl*> polymorphicBases;
+    Root root;
+    //    ostringstream os;
 
 
 public:
-    explicit FindNamedClassVisitor(ASTContext *context)
-        : context(context), policy(context->getLangOpts()) {
+    explicit RecursiveMapVisitor(ASTContext *context, const MappingData& md,
+        list<const CXXRecordDecl*>& toBeMapped)
+        : context(context), policy(context->getLangOpts()), md(md), toBeMapped(toBeMapped) {
         policy.SuppressTagKeyword = true;
         policy.Bool = true;
     }
 
-    void SerializeTree(FILE* ostream) {
-        doMapping();
-
-        if (Dump) {
-            dbgDumpTree(&root, false, ostream ? ostream : stdout);
-        }
-        else if (Idl){
-            string buffer = os.str();
-            fwrite(buffer.c_str(), buffer.size(), 1, ostream ? ostream : stdout);
-        }
-        else if (Print) {
-            printRoot(root);
-        }
-        else if (ostream) {
-            OStream OS(ostream);
-            serializeRoot(root, OS);
-        }
-        else {
-            printRoot(root);
-        }
+    Root& getRoot() {
+        return root;
     }
 
+    bool VisitCXXRecordDecl(CXXRecordDecl *declaration) {
+
+        if (declaration->hasDefinition()) {
+            const CXXRecordDecl* canon = declaration->getCanonicalDecl();
+            if (!isAlreadyProcessed(canon)) {
+                for (auto it : polymorphicBases) {
+                    if (canon->isDerivedFrom(it)) {
+                        toBeMapped.emplace_back(declaration);
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    bool doMapping() {
+
+        if (toBeMapped.empty())
+            return false;
+
+        size_t before = polymorphicBases.size();
+        while (!toBeMapped.empty()) {
+            alreadyMapped.insert(toBeMapped.front());
+            addMapping(toBeMapped.front());
+            toBeMapped.pop_front();
+        }
+
+        return before != polymorphicBases.size();
+    }
+
+private:
+    bool isAlreadyProcessed(const CXXRecordDecl* declaration) {
+        if (alreadyMapped.find(declaration) != alreadyMapped.end())
+            return true;
+
+        for (auto each : toBeMapped) {
+            if (each == declaration)
+                return true;
+        }
+
+        return false;
+    }
+
+    void addMapping(const CXXRecordDecl *declaration) {
+
+        errs() << "Processing " << declaration->getNameAsString() << "\n";
+
+        //declaration->dump();
+        unique_ptr<Structure> str(new Structure);
+
+        str->name = declaration->getNameAsString();
+        str->declType = Structure::MAPPING;
+        str->type = Structure::STRUCT;
+
+        str->location = getLocation(declaration->getLocStart());
+
+        auto bases = declaration->bases();
+        //        size_t sz = distance(bases.begin(), bases.end());
+
+        if (bases.begin() != bases.end()) {
+            QualType inherit = bases.begin()->getType();
+            str->inheritedFrom = inherit.getCanonicalType().getAsString(policy);
+            const Type* t = inherit.getTypePtrOrNull();
+            if (t && Dependencies) {
+                const CXXRecordDecl* baseDecl = t->getAsCXXRecordDecl();
+                if (baseDecl->hasDefinition()) {
+                    const CXXRecordDecl* canon = baseDecl->getCanonicalDecl();
+                    if (!isAlreadyProcessed(canon)) {
+                        toBeMapped.emplace_back(canon);
+                    }
+                }
+            }
+        }
+
+        string mappingArgs;
+        if (declaration->hasAttr<HareMappingAttr>()) {
+            HareMappingAttr* at = declaration->getAttr<HareMappingAttr>();
+            StringRef ma = at->getArgument();
+            if (!ma.empty()) {
+                Variant val;
+                val.kind = Variant::STRING;
+                val.stringValue = ma.str();
+                str->encodingSpecifics.attrs["Attribute"] = val;
+            }
+        }
+
+        RecordDecl::field_range r = declaration->fields();
+        for (auto it = r.begin(); it != r.end(); ++it) {
+
+            unique_ptr<DataMember> dm(new DataMember);
+            FieldDecl* current = *it;
+
+            dm->location = getLocation(current->getLocStart());
+
+            dm->name = current->getDeclName().getAsString();
+
+            bool flag = processType(dm->type, current->getType());
+            if (flag)
+                str->members.emplace_back(dm.release());
+        }
+        root.structures.push_back(std::move(str));
+    }
+
+    bool processType(DataType& dt, QualType qt) {
+
+        if (qt.hasQualifiers())
+            qt = qt.getUnqualifiedType();
+
+        if (!qt.isCanonical())
+            qt = qt.getCanonicalType();
+
+
+        string typeName = qt.getAsString(policy);
+        const Type* t = qt.getTypePtrOrNull();
+
+        auto mapIt = md.typeMapping.find(t);
+        if (mapIt != md.typeMapping.end()) {
+            dt.kind = DataType::MAPPING_SPECIFIC;
+            dt.mappingName = mapIt->second;
+            return true;
+        }
+        else if (t->isBuiltinType()) {
+            dt.kind = DataType::MAPPING_SPECIFIC;
+            dt.mappingName = typeName;
+            return true;
+        }
+        else if (t->isEnumeralType()) {
+
+            dt.kind = DataType::ENUM;
+
+            EnumDecl* ed = t->getAs<EnumType>()->getDecl();
+            dt.mappingName = ed->getName();
+
+            auto r = ed->enumerators();
+            if (r.begin() != r.end()) {
+                for (auto it = r.begin(); it != r.end(); ++it) {
+
+                    const APSInt& val = it->getInitVal();
+                    typedef decltype(dt.enumValues)::value_type::second_type st;
+                    if (val >= numeric_limits<st>::min() && val <= numeric_limits<st>::max()) {
+                        const string& valName = it->getName();
+                        dt.enumValues[valName] = static_cast<st>(val.getExtValue());
+                    }
+                    else {
+                        errs() << "Enumeral value out of range " << val << "\n";
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        else if (t->isRecordType()) {
+            const RecordType *rt = t->getAs<RecordType>();
+            RecordDecl* decl = rt->getDecl();
+
+            ClassTemplateSpecializationDecl* tDecl = dyn_cast<ClassTemplateSpecializationDecl>(decl);
+            if (tDecl) {
+                ClassTemplateDecl* ctDecl = tDecl->getSpecializedTemplate();
+                const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
+
+                auto it = md.sequenceType.find(ctDecl);
+                if (it != md.sequenceType.end()) {
+
+                    dt.kind = DataType::SEQUENCE;
+                    dt.mappingName = it->second;
+
+                    dt.paramType.reset(new DataType());
+                    if (args.size() >= 2) {
+                        if (!processType(*dt.paramType, args.get(0).getAsType()))
+                            return false;
+                    }
+                    else {
+                        //vector<bool> specialization
+                        dt.paramType->kind = DataType::MAPPING_SPECIFIC;
+                        dt.paramType->mappingName = "bool";
+                    }
+
+                    return true;
+                }
+
+                auto it1 = md.owningPtrType.find(ctDecl);
+                if (it1 != md.owningPtrType.end()) {
+
+                    dt.kind = DataType::SEQUENCE;
+                    dt.mappingName = it1->second;
+
+                    dt.paramType.reset(new DataType());
+                    if (args.size() >= 2) {
+                        QualType qt0 = args.get(0).getAsType();
+                        if (!processType(*dt.paramType, qt0))
+                            return false;
+                        
+                        if (Dependencies) {
+                            const Type* t0 = qt0.getTypePtrOrNull();
+                            const CXXRecordDecl* pointedDecl = t0->getAsCXXRecordDecl();
+                            if (pointedDecl->hasDefinition()) {
+                                const CXXRecordDecl* canon0 = pointedDecl->getCanonicalDecl();
+                                polymorphicBases.insert(canon0);
+                            }
+                        }
+                    }
+                    else {
+                        return false;
+                    }
+
+                    return true;
+                }
+
+                auto it2 = md.dictionaryType.find(ctDecl);
+                if (it2 != md.dictionaryType.end()) {
+
+                    dt.kind = DataType::DICTIONARY;
+                    dt.mappingName = it2->second;
+
+                    dt.keyType.reset(new DataType());
+                    if (!processType(*dt.keyType, args.get(0).getAsType()))
+                        return false;
+
+                    dt.paramType.reset(new DataType());
+                    if (!processType(*dt.paramType, args.get(1).getAsType()))
+                        return false;
+
+                    return true;
+                }
+            }
+            else {
+                dt.kind = DataType::NAMED_TYPE;
+                dt.mappingName = typeName;
+
+                if (Dependencies) {
+                    const CXXRecordDecl* namedDecl = t->getAsCXXRecordDecl();
+                    if (namedDecl->hasDefinition()) {
+                        const CXXRecordDecl* canon = namedDecl->getCanonicalDecl();
+                        if (!isAlreadyProcessed(canon)) {
+                            toBeMapped.emplace_back(canon);
+                        }
+                    }
+                }
+
+                return true;
+            }
+        }
+        else if (t->isPointerType()) {
+            errs() << "Unsupported pointer type " << typeName << "\n";
+            return false;
+        }
+
+        errs() << "Unsupported type " << typeName << "\n";
+        return false;
+    }
+
+    Location getLocation(const SourceLocation& loc) const {
+        Location location;
+
+        FullSourceLoc fullLoc = context->getFullLoc(loc);
+        location.lineNumber = fullLoc.getSpellingLineNumber();
+        location.fileName = fullLoc.getManager().getFilename(fullLoc).str();
+
+        return location;
+    }
+};
+
+
+class FindNamedClassVisitor
+    : public RecursiveASTVisitor<FindNamedClassVisitor> {
+private:
+    ASTContext *context;
+    MappingData& md;
+    set<string> toBeFoundAndMapped;
+    list<const CXXRecordDecl*>& toBeMapped; //better to keep order
+
+
+public:
+    explicit FindNamedClassVisitor(ASTContext *context, MappingData& md,
+        list<const CXXRecordDecl*>& toBeMapped)
+        : context(context), md(md), toBeMapped(toBeMapped) {
+        toBeFoundAndMapped.insert(FindClasses.begin(), FindClasses.end());
+    }
+
+    
     //bool VisitTypeAliasDecl(TypeAliasDecl* declaration) {
 
     //    StringRef name = declaration->getName();
@@ -156,7 +453,21 @@ public:
                 ClassTemplateSpecializationDecl* ctsDecl = dyn_cast<ClassTemplateSpecializationDecl>(rDecl);
                 if (ctsDecl) {
                     ClassTemplateDecl* ctDecl = ctsDecl->getSpecializedTemplate();
-                    sequenceType.emplace(ctDecl, n);
+                    md.sequenceType.emplace(ctDecl, n);
+                }
+            }
+        }
+        else if (name.substr(0, 16) == "hare_owning_ptr_") {
+            string n = declaration->getDeclName().getAsString().substr(16);
+            QualType qt = declaration->getUnderlyingType();
+            const Type* t = qt.getCanonicalType().getTypePtrOrNull();
+            if (t && t->isRecordType()) {
+                const RecordType *rt = t->getAs<RecordType>();
+                RecordDecl* rDecl = rt->getDecl();
+                ClassTemplateSpecializationDecl* ctsDecl = dyn_cast<ClassTemplateSpecializationDecl>(rDecl);
+                if (ctsDecl) {
+                    ClassTemplateDecl* ctDecl = ctsDecl->getSpecializedTemplate();
+                    md.owningPtrType.emplace(ctDecl, n);
                 }
             }
         }
@@ -170,7 +481,7 @@ public:
                 ClassTemplateSpecializationDecl* ctsDecl = dyn_cast<ClassTemplateSpecializationDecl>(rDecl);
                 if (ctsDecl) {
                     ClassTemplateDecl* ctDecl = ctsDecl->getSpecializedTemplate();
-                    dictionaryType.emplace(ctDecl, n);
+                    md.dictionaryType.emplace(ctDecl, n);
                 }
             }
         }
@@ -179,20 +490,19 @@ public:
             QualType qt = declaration->getUnderlyingType();
             const Type* t = qt.getCanonicalType().getTypePtrOrNull();
             if (t) {
-                typeMapping[t] = n;
+                md.typeMapping[t] = n;
             }
         }
         else {
-            auto it = find(FindClasses.begin(), FindClasses.end(), name.str());
-            if (it != FindClasses.end()) {
+            auto it = toBeFoundAndMapped.find(name.str());
+            if (it != toBeFoundAndMapped.end()) {
 
                 QualType qt = declaration->getUnderlyingType();
-                const Type* t = qt.getCanonicalType().getTypePtrOrNull();
+                const Type* t = qt.getTypePtrOrNull();
                 if (t) {
-                    CXXRecordDecl * d = t->getAsCXXRecordDecl();
-                    if (d) {
-                        toBeMapped.emplace_back(d, name);
-                    }
+                    const CXXRecordDecl* decl = t->getAsCXXRecordDecl();
+                    addToBeMapped(decl);
+                    toBeFoundAndMapped.erase(it);
                 }
             }
         }
@@ -204,18 +514,19 @@ public:
 
         StringRef name = declaration->getName();
 
-        auto it = find(FindClasses.begin(), FindClasses.end(), name.str());
-        if (it != FindClasses.end()) {
-            addMapping(declaration, name);
+        auto it = toBeFoundAndMapped.find(name.str());
+        if (it != toBeFoundAndMapped.end()) {
+            addToBeMapped(declaration);
+            toBeFoundAndMapped.erase(it);
         }
         else if (FindByAttribute && declaration->hasAttr<HareMappingAttr>()) {
-            addMapping(declaration, name);
+            addToBeMapped(declaration);
         }
         else if (declaration->hasAttr<AnnotateAttr>()) {
             AnnotateAttr* at = declaration->getAttr<AnnotateAttr>();
             StringRef t = at->getAnnotation();
             if (t == "hare::mapping") {
-                addMapping(declaration, name);
+                addToBeMapped(declaration);
             }
         }
 
@@ -223,338 +534,22 @@ public:
     }
 
 private:
-    void doMapping() {
-        for (auto each : toBeMapped)
-            addMapping(each.first, each.second);
+
+    void addToBeMapped(const CXXRecordDecl* declaration) {
+        if (declaration && declaration->hasDefinition()) {
+            const CXXRecordDecl* canon = declaration->getCanonicalDecl();
+            if (!findToBeMapped(canon)) {
+                toBeMapped.emplace_back(canon);
+            }
+        }
     }
 
-    void addMapping(const CXXRecordDecl *declaration, const string& name) {
-        if (Idl)
-            addMappingIdl(declaration, name);
-        else
-            addMappingTree(declaration, name);
-    }
-
-    void addMappingTree(const CXXRecordDecl *declaration, const string& name) {
-
-//        declaration->dump();
-        unique_ptr<Structure> str(new Structure);
-
-        str->name = name;
-        str->declType = Structure::MAPPING;
-        str->type = Structure::STRUCT;
-
-        str->location = getLocation(declaration->getLocStart());
-
-        auto bases = declaration->bases();
-//        size_t sz = distance(bases.begin(), bases.end());
-
-        if (bases.begin() != bases.end()) {
-            QualType inherit = bases.begin()->getType();
-            str->inheritedFrom = inherit.getCanonicalType().getAsString(policy);
-        }
-
-        string mappingArgs;
-        if (declaration->hasAttr<HareMappingAttr>()) {
-            HareMappingAttr* at = declaration->getAttr<HareMappingAttr>();
-            StringRef ma = at->getArgument();
-            if (!ma.empty()) {
-                Variant val;
-                val.kind = Variant::STRING;
-                val.stringValue = ma.str();
-                str->encodingSpecifics.attrs["Attribute"] = val;
-            }
-        }
-
-        RecordDecl::field_range r = declaration->fields();
-        for (auto it = r.begin(); it != r.end(); ++it) {
-
-            unique_ptr<DataMember> dm(new DataMember);
-            FieldDecl* current = *it;
-
-            dm->location = getLocation(current->getLocStart());
-
-            dm->name = current->getDeclName().getAsString();
-            
-            bool flag = processType(dm->type, current->getType());
-            if(flag)
-                str->members.emplace_back(dm.release());
-            /*
-            if (current->hasAttr<HareEncodeAsAttr>()) {
-                HareEncodeAsAttr* at = current->getAttr<HareEncodeAsAttr>();
-                llvm::outs() << t.getAsString() << " " << n << " " << at->getEncoding().str() << ";\n";
-            }
-            else if (current->hasAttr<AnnotateAttr>()) {
-                AnnotateAttr* at = current->getAttr<AnnotateAttr>();
-                StringRef anot = at->getAnnotation();
-                if (anot.startswith("hare::encode_as(")) {
-                    llvm::outs() << t.getAsString() << " " << n << " " << anot << ";\n";
-                }
-            }
-            else
-*/
-        }
-        root.structures.push_back(std::move(str));
-    }
-
-    bool processType(DataType& dt, QualType qt) const {
-
-        if (qt.hasQualifiers())
-            qt = qt.getUnqualifiedType();
-
-        if (!qt.isCanonical())
-            qt = qt.getCanonicalType();
-
-
-        string typeName = qt.getAsString(policy);
-        const Type* t = qt.getTypePtrOrNull();
-        
-        auto mapIt = typeMapping.find(t);
-        if (mapIt != typeMapping.end()) {
-            dt.kind = DataType::MAPPING_SPECIFIC;
-            dt.mappingName = mapIt->second;
-            return true;
-        }
-        else if (t->isBuiltinType()) {
-            dt.kind = DataType::MAPPING_SPECIFIC;
-            dt.mappingName = typeName;
-            return true;
-        }
-        else if (t->isEnumeralType()) {
-
-            dt.kind = DataType::ENUM;
-            
-            EnumDecl* ed = t->getAs<EnumType>()->getDecl();
-            dt.name = ed->getName();
-
-            auto r = ed->enumerators();
-            if (r.begin() != r.end()) {
-                for (auto it = r.begin(); it != r.end(); ++it) {
-
-                    const APSInt& val = it->getInitVal();
-                    typedef decltype(dt.enumValues)::value_type::second_type st;
-                    if (val >= numeric_limits<st>::min() && val <= numeric_limits<st>::max()) {
-                        const string& valName = it->getName();
-                        dt.enumValues[valName] = static_cast<st>(val.getExtValue());
-                    }
-                    else {
-                        errs() << "Enumeral value out of range " << val << "\n";
-                        return false;
-                    }
-                }
-            }
-            return true;
-        }
-        else if (t->isRecordType()) {
-            const RecordType *rt = t->getAs<RecordType>();
-            RecordDecl* decl = rt->getDecl();
-
-            ClassTemplateSpecializationDecl* tDecl = dyn_cast<ClassTemplateSpecializationDecl>(decl);
-            if (tDecl) {
-                ClassTemplateDecl* ctDecl = tDecl->getSpecializedTemplate();
-                const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
-
-                auto it = sequenceType.find(ctDecl);
-                if (it != sequenceType.end()) {
-
-                    dt.kind = DataType::SEQUENCE;
-
-                    dt.name = it->second;
-                    dt.mappingName = it->second;
-
-                    dt.paramType.reset(new DataType());
-                    if (args.size() >= 2) {
-                        if (!processType(*dt.paramType, args.get(0).getAsType()))
-                            return false;
-                    }
-                    else {
-                        //vector<bool> specialization
-                        dt.paramType->kind = DataType::MAPPING_SPECIFIC;
-                        dt.paramType->mappingName = "bool";
-                    }
-                    //Workaround to match previous behaviour
-                    if (dt.paramType->kind == DataType::MAPPING_SPECIFIC) {
-                        errs() << "Fixig paramType->kind : " << dt.paramType->mappingName << "\n";
-                        dt.paramType->kind = DataType::NAMED_TYPE;
-                        dt.paramType->name = dt.paramType->mappingName;
-                    }
-
-                    return true;
-                }
-
-                auto it2 = dictionaryType.find(ctDecl);
-                if (it2 != dictionaryType.end()){
-
-                    dt.kind = DataType::DICTIONARY;
-                    dt.name = it2->second;
-                    dt.mappingName = it2->second;
-
-                    dt.keyType.reset(new DataType());
-                    if (!processType(*dt.keyType, args.get(0).getAsType()))
-                        return false;
-
-                    dt.paramType.reset(new DataType());
-                    if (!processType(*dt.paramType, args.get(1).getAsType()))
-                        return false;
-
-                    //Workaround to match previous behaviour
-                    if (dt.keyType->kind == DataType::MAPPING_SPECIFIC) {
-                        errs() << "Fixig keyType->kind : " << dt.keyType->mappingName << "\n";
-                        dt.keyType->kind = DataType::NAMED_TYPE;
-                        dt.keyType->name = dt.keyType->mappingName;
-                    }
-
-                    if (dt.paramType->kind == DataType::MAPPING_SPECIFIC) {
-                        errs() << "Fixig paramType->kind : " << dt.paramType->mappingName << "\n";
-                        dt.paramType->kind = DataType::NAMED_TYPE;
-                        dt.paramType->name = dt.paramType->mappingName;
-                    }
-
-                    return true;
-                }
-            }
-            else {
-                dt.kind = DataType::MAPPING_SPECIFIC;
-                dt.mappingName = typeName;
-
-//                dt.mappingAttrs.emplace("className", Variant(typeName));
-
+    bool findToBeMapped(const CXXRecordDecl* declaration) {
+        for (auto each : toBeMapped) {
+            if (each == declaration)
                 return true;
-            }
         }
-        else if (t->isPointerType()) {
-            errs() << "Unsupported pointer type " << typeName << "\n";
-            return false;
-        }
-
-        errs() << "Unsupported type " << typeName << "\n";
         return false;
-    }
-
-    Location getLocation(const SourceLocation& loc) const {
-        Location location;
-
-        FullSourceLoc fullLoc = context->getFullLoc(loc);
-        location.lineNumber = fullLoc.getSpellingLineNumber();
-        location.fileName = fullLoc.getManager().getFilename(fullLoc).str();
-
-        return location;
-    }
-
-    void addMappingIdl(const CXXRecordDecl *declaration, const string& name) {
-
-        //        declaration->dump();
-
-        FullSourceLoc fullLocation = context->getFullLoc(declaration->getLocStart());
-        string fn = fullLocation.getManager().getFilename(fullLocation).str();
-        unsigned int line = fullLocation.getSpellingLineNumber();
-        os << "#line " << line << " \"" << fn << "\";\n";
-
-        string mappingArgs;
-        if (declaration->hasAttr<HareMappingAttr>()) {
-            HareMappingAttr* at = declaration->getAttr<HareMappingAttr>();
-            StringRef ma = at->getArgument();
-            if (!ma.empty()) {
-                mappingArgs += ", Attribute=\"";
-                mappingArgs += ma;
-                mappingArgs += "\" ";
-            }
-        }
-
-        os << "MAPPING( FrontEnd=\"1.0\"" << mappingArgs << ") PUBLISHABLE-STRUCT " << name << " {\n";
-        ++line;
-
-        RecordDecl::field_range r = declaration->fields();
-        for (auto it = r.begin(); it != r.end(); ++it) {
-            FieldDecl* current = *it;
-            string n = current->getDeclName().getAsString();
-            //                string t = current->getType().getCanonicalType().getAsString();
-            QualType qt = current->getType();
-
-            if (qt.hasQualifiers()) {
-                //TODO report error?
-                qt = qt.getUnqualifiedType();
-            }
-
-            const Type* t = qt.getCanonicalType().getTypePtrOrNull();
-            auto mapIt = typeMapping.find(t);
-            string typeName = mapIt != typeMapping.end() ? mapIt->second : qt.getAsString(policy);
-
-            FullSourceLoc currentLoc = context->getFullLoc(current->getLocStart());
-            fixLineNumber(fn, line, currentLoc);
-
-            //assert(t);
-            if (t->isPointerType()) {
-                ; //ignore
-            }
-            else if (t->isEnumeralType()) {
-                size_t l = typeName.find_last_of(':');
-                if (l != string::npos)
-                    typeName = typeName.substr(l + 1);
-                os << "enum " << typeName << " ";
-                EnumDecl* ed = t->getAs<EnumType>()->getDecl();
-                auto r = ed->enumerators();
-                if (r.begin() != r.end()) {
-                    os << "{";
-                    for (auto it = r.begin(); it != r.end(); ++it) {
-                        if (it != r.begin())
-                            os << ",";
-
-                        os << "IDENTIFIER( \"" << it->getName().str() << "\" ) = ";
-                        os << it->getInitVal().toString(10);
-                    }
-                    os << "} ";
-                }
-            }
-            else
-                os << typeName << " ";
-
-
-            os << current->getDeclName().getAsString() << ";\n";
-            ++line;
-            /*
-            if (current->hasAttr<HareEncodeAsAttr>()) {
-            HareEncodeAsAttr* at = current->getAttr<HareEncodeAsAttr>();
-            llvm::outs() << t.getAsString() << " " << n << " " << at->getEncoding().str() << ";\n";
-            }
-            else if (current->hasAttr<AnnotateAttr>()) {
-            AnnotateAttr* at = current->getAttr<AnnotateAttr>();
-            StringRef anot = at->getAnnotation();
-            if (anot.startswith("hare::encode_as(")) {
-            llvm::outs() << t.getAsString() << " " << n << " " << anot << ";\n";
-            }
-            }
-            else
-            */
-        }
-        os << "};\n\n";
-    }
-
-    void fixLineNumber(string& fileName, unsigned int& line, FullSourceLoc location) {
-        unsigned int currentLine = location.getSpellingLineNumber();
-        StringRef currentFileName = location.getManager().getFilename(location);
-
-        if (fileName != currentFileName) {
-            fileName = currentFileName;
-            line = currentLine;
-            os << "#line " << line << " \"" << fileName << "\";\n";
-        }
-        else {
-
-            if (currentLine != line) {
-                if (currentLine > line && currentLine - line < 10) {
-                    while (currentLine != line) {
-                        os << "\n";
-                        ++line;
-                    }
-                }
-                else {
-                    line = currentLine;
-                    os << "#line " << line << ";\n";
-                }
-            }
-        }
-
     }
 
     static bool beginsWith(const string& name, const string& prefix) {
@@ -564,15 +559,25 @@ private:
 
 class FindNamedClassConsumer : public ASTConsumer {
 private:
-    FindNamedClassVisitor visitor;
+    MappingData md;
+    list<const CXXRecordDecl*> toBeMapped; //better to keep order
+    FindNamedClassVisitor visitor1;
+    RecursiveMapVisitor visitor2;
     FILE* os;
 public:
     explicit FindNamedClassConsumer(ASTContext *context, FILE* os)
-        : visitor(context), os(os) {}
+        : visitor1(context, md, toBeMapped), visitor2(context, md, toBeMapped), os(os)
+    {}
 
     virtual void HandleTranslationUnit(ASTContext &context) {
-        visitor.TraverseDecl(context.getTranslationUnitDecl());
-        visitor.SerializeTree(os);
+        visitor1.TraverseDecl(context.getTranslationUnitDecl());
+
+        while(visitor2.doMapping()) {
+            errs() << "-----------\n";
+            visitor2.TraverseDecl(context.getTranslationUnitDecl());
+        }
+
+        SerializeTree(os, visitor2.getRoot());
     }
 };
 
