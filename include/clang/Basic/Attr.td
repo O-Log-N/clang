@@ -2174,7 +2174,7 @@ def InternalLinkage : InheritableAttr {
 def HareMapping : InheritableAttr {
   let Spellings = [CXX11<"hare","mapping">];
   let Args = [StringArgument<"Argument", 1>];
-  let Subjects = SubjectList<[CXXRecord]>;
+  let Subjects = SubjectList<[TypedefName]>;
   let Documentation = [HareMappingDocs];
 }
 

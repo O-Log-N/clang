@@ -109,6 +109,7 @@ void SerializeTree(FILE* ostream, Root& root) {
 
 struct MappingData {
     map<const Type*, string> typeMapping;
+    pair<const ClassTemplateSpecializationDecl*, string> vectorBool;
     map<const ClassTemplateDecl*, string> sequenceType;
     map<const ClassTemplateDecl*, string> owningPtrType;
     map<const ClassTemplateDecl*, string> dictionaryType;
@@ -295,7 +296,18 @@ private:
             RecordDecl* decl = rt->getDecl();
 
             ClassTemplateSpecializationDecl* tDecl = dyn_cast<ClassTemplateSpecializationDecl>(decl);
+            //tDecl->dump();
             if (tDecl) {
+                if (tDecl == md.vectorBool.first) {
+                    dt.kind = DataType::SEQUENCE;
+                    dt.mappingName = md.vectorBool.second;
+
+                    dt.paramType.reset(new DataType());
+                    dt.paramType->kind = DataType::MAPPING_SPECIFIC;
+                    dt.paramType->mappingName = "bool";
+                    return true;
+                }
+
                 ClassTemplateDecl* ctDecl = tDecl->getSpecializedTemplate();
                 const TemplateArgumentList& args = tDecl->getTemplateInstantiationArgs();
 
@@ -306,15 +318,11 @@ private:
                     dt.mappingName = it->second;
 
                     dt.paramType.reset(new DataType());
-                    if (args.size() >= 2) {
-                        if (!processType(*dt.paramType, args.get(0).getAsType()))
-                            return false;
-                    }
-                    else {
-                        //vector<bool> specialization
-                        dt.paramType->kind = DataType::MAPPING_SPECIFIC;
-                        dt.paramType->mappingName = "bool";
-                    }
+                    if (args.size() < 1)
+                        return false;
+
+                    if (!processType(*dt.paramType, args.get(0).getAsType()))
+                        return false;
 
                     return true;
                 }
@@ -326,22 +334,20 @@ private:
                     dt.mappingName = it1->second;
 
                     dt.paramType.reset(new DataType());
-                    if (args.size() >= 2) {
-                        QualType qt0 = args.get(0).getAsType();
-                        if (!processType(*dt.paramType, qt0))
-                            return false;
-                        
-                        if (Dependencies) {
-                            const Type* t0 = qt0.getTypePtrOrNull();
-                            const CXXRecordDecl* pointedDecl = t0->getAsCXXRecordDecl();
-                            if (pointedDecl->hasDefinition()) {
-                                const CXXRecordDecl* canon0 = pointedDecl->getCanonicalDecl();
-                                polymorphicBases.insert(canon0);
-                            }
-                        }
-                    }
-                    else {
+                    if (args.size() < 1)
                         return false;
+
+                    QualType qt0 = args.get(0).getAsType();
+                    if (!processType(*dt.paramType, qt0))
+                        return false;
+                        
+                    if (Dependencies) {
+                        const Type* t0 = qt0.getTypePtrOrNull();
+                        const CXXRecordDecl* pointedDecl = t0->getAsCXXRecordDecl();
+                        if (pointedDecl->hasDefinition()) {
+                            const CXXRecordDecl* canon0 = pointedDecl->getCanonicalDecl();
+                            polymorphicBases.insert(canon0);
+                        }
                     }
 
                     return true;
@@ -349,6 +355,9 @@ private:
 
                 auto it2 = md.dictionaryType.find(ctDecl);
                 if (it2 != md.dictionaryType.end()) {
+
+                    if (args.size() < 2)
+                        return false;
 
                     dt.kind = DataType::DICTIONARY;
                     dt.mappingName = it2->second;
@@ -387,6 +396,7 @@ private:
         }
 
         errs() << "Unsupported type " << typeName << "\n";
+        t->dump();
         return false;
     }
 
@@ -419,94 +429,121 @@ public:
     }
 
     
-    //bool VisitTypeAliasDecl(TypeAliasDecl* declaration) {
-
-    //    StringRef name = declaration->getName();
-    //    if (name.substr(0, 14) == "hare_sequence_") {
-    //        QualType qt = declaration->getUnderlyingType();
-    //        const Type* t = qt.getCanonicalType().getTypePtrOrNull();
-    //        if (t) {
-    //            const TemplateSpecializationType* ts = t->getAs<TemplateSpecializationType>();
-    //            QualType qt2 = ts->desugar();
-    //            const Type* t2 = qt2.getCanonicalType().getTypePtrOrNull();
-    //            if (t2) {
-    //                t->dump();
-    //                t2->dump();
-
-    //            }
-    //        }
-    //    }
-
-    //    return true;
-    //}
+    bool VisitTypeAliasDecl(TypeAliasDecl* declaration) {
+        //if (beginsWith(declaration->getName().str(), "hare_"))
+        //    declaration->dump();
+        return visitTypedefOrTypeAlias(declaration);
+    }
 
     bool VisitTypedefNameDecl(TypedefNameDecl* declaration) {
+        return visitTypedefOrTypeAlias(declaration);
+    }
 
+
+    bool visitTypedefOrTypeAlias(TypedefNameDecl* declaration) {
+
+        
         StringRef name = declaration->getName();
-        if (name.substr(0, 14) == "hare_sequence_") {
-            string n = declaration->getDeclName().getAsString().substr(14);
-            QualType qt = declaration->getUnderlyingType();
-            const Type* t = qt.getCanonicalType().getTypePtrOrNull();
-            if (t && t->isRecordType()) {
-                const RecordType *rt = t->getAs<RecordType>();
-                RecordDecl* rDecl = rt->getDecl();
-                ClassTemplateSpecializationDecl* ctsDecl = dyn_cast<ClassTemplateSpecializationDecl>(rDecl);
-                if (ctsDecl) {
-                    ClassTemplateDecl* ctDecl = ctsDecl->getSpecializedTemplate();
-                    md.sequenceType.emplace(ctDecl, n);
-                }
+        string declName = declaration->getDeclName().getAsString();
+
+        if (name.startswith("hare_")) {
+
+            StringRef mapping;
+
+            HareMappingAttr* at = declaration->getAttr<HareMappingAttr>();
+            if (at) {
+                mapping = at->getArgument();
             }
-        }
-        else if (name.substr(0, 16) == "hare_owning_ptr_") {
-            string n = declaration->getDeclName().getAsString().substr(16);
-            QualType qt = declaration->getUnderlyingType();
-            const Type* t = qt.getCanonicalType().getTypePtrOrNull();
-            if (t && t->isRecordType()) {
-                const RecordType *rt = t->getAs<RecordType>();
-                RecordDecl* rDecl = rt->getDecl();
-                ClassTemplateSpecializationDecl* ctsDecl = dyn_cast<ClassTemplateSpecializationDecl>(rDecl);
-                if (ctsDecl) {
-                    ClassTemplateDecl* ctDecl = ctsDecl->getSpecializedTemplate();
-                    md.owningPtrType.emplace(ctDecl, n);
-                }
-            }
-        }
-        else if (name.substr(0, 16) == "hare_dictionary_") {
-            string n = declaration->getDeclName().getAsString().substr(16);
-            QualType qt = declaration->getUnderlyingType();
-            const Type* t = qt.getCanonicalType().getTypePtrOrNull();
-            if (t && t->isRecordType()) {
-                const RecordType *rt = t->getAs<RecordType>();
-                RecordDecl* rDecl = rt->getDecl();
-                ClassTemplateSpecializationDecl* ctsDecl = dyn_cast<ClassTemplateSpecializationDecl>(rDecl);
-                if (ctsDecl) {
-                    ClassTemplateDecl* ctDecl = ctsDecl->getSpecializedTemplate();
-                    md.dictionaryType.emplace(ctDecl, n);
-                }
-            }
-        }
-        else if (name.substr(0, 5) == "hare_") {
-            string n = declaration->getDeclName().getAsString().substr(5);
-            QualType qt = declaration->getUnderlyingType();
-            const Type* t = qt.getCanonicalType().getTypePtrOrNull();
-            if (t) {
-                md.typeMapping[t] = n;
-            }
-        }
-        else {
-            auto it = toBeFoundAndMapped.find(name.str());
-            if (it != toBeFoundAndMapped.end()) {
+                
+            if (name.startswith("hare_sequence")) {
+                static const size_t seqLen = strlen("hare_sequence_");
+                StringRef n = mapping.empty() ? name.substr(seqLen) : mapping;
 
                 QualType qt = declaration->getUnderlyingType();
-                const Type* t = qt.getTypePtrOrNull();
+                const Type* t = qt.getCanonicalType().getTypePtrOrNull();
+                if (t && t->isRecordType()) {
+                    const RecordType *rt = t->getAs<RecordType>();
+                    RecordDecl* rDecl = rt->getDecl();
+                    ClassTemplateSpecializationDecl* ctsDecl = dyn_cast<ClassTemplateSpecializationDecl>(rDecl);
+                    if (ctsDecl) {
+                        ClassTemplateDecl* ctDecl = ctsDecl->getSpecializedTemplate();
+                        md.sequenceType.emplace(ctDecl, n.str());
+                    }
+                }
+            }
+            else if (name.startswith("hare_owning_ptr")) {
+                static const size_t ownLen = strlen("hare_owning_ptr_");
+                StringRef n = mapping.empty() ? name.substr(ownLen) : mapping;
+
+                QualType qt = declaration->getUnderlyingType();
+                const Type* t = qt.getCanonicalType().getTypePtrOrNull();
+                if (t && t->isRecordType()) {
+                    const RecordType *rt = t->getAs<RecordType>();
+                    RecordDecl* rDecl = rt->getDecl();
+                    ClassTemplateSpecializationDecl* ctsDecl = dyn_cast<ClassTemplateSpecializationDecl>(rDecl);
+                    if (ctsDecl) {
+                        ClassTemplateDecl* ctDecl = ctsDecl->getSpecializedTemplate();
+                        md.owningPtrType.emplace(ctDecl, n);
+                    }
+                }
+            }
+            else if (name.startswith("hare_dictionary_")) {
+                static const size_t dictLen = strlen("hare_dictionary_");
+                StringRef n = mapping.empty() ? name.substr(dictLen) : mapping;
+
+                QualType qt = declaration->getUnderlyingType();
+                const Type* t = qt.getCanonicalType().getTypePtrOrNull();
+                if (t && t->isRecordType()) {
+                    const RecordType *rt = t->getAs<RecordType>();
+                    RecordDecl* rDecl = rt->getDecl();
+                    ClassTemplateSpecializationDecl* ctsDecl = dyn_cast<ClassTemplateSpecializationDecl>(rDecl);
+                    if (ctsDecl) {
+                        ClassTemplateDecl* ctDecl = ctsDecl->getSpecializedTemplate();
+                        md.dictionaryType.emplace(ctDecl, n.str());
+                    }
+                }
+            }
+            //Special case to handle std::vector<bool>
+            else if (name.startswith("hare_vectorbool")) {
+                static const size_t vectBoolLen = strlen("hare_vectorbool_");
+                StringRef n = mapping.empty() ? name.substr(vectBoolLen) : mapping;
+
+                QualType qt = declaration->getUnderlyingType();
+                const Type* t = qt.getCanonicalType().getTypePtrOrNull();
+                if (t->isRecordType()) {
+                    const RecordType *rt = t->getAs<RecordType>();
+                    const RecordDecl* decl = rt->getDecl();
+                    const ClassTemplateSpecializationDecl* tDecl = dyn_cast<const ClassTemplateSpecializationDecl>(decl);
+                    if (tDecl) {
+
+                        md.vectorBool = make_pair(tDecl, n.str());
+                    }
+                }
+            }
+            else if (name.startswith("hare_mapping")) {
+                static const size_t mapLen = strlen("hare_mapping_");
+                StringRef n = mapping.empty() ? name.substr(mapLen) : mapping;
+
+                QualType qt = declaration->getUnderlyingType();
+                const Type* t = qt.getCanonicalType().getTypePtrOrNull();
                 if (t) {
-                    const CXXRecordDecl* decl = t->getAsCXXRecordDecl();
-                    addToBeMapped(decl);
-                    toBeFoundAndMapped.erase(it);
+                    md.typeMapping[t] = n.str();
+                }
+            }
+            else {
+                auto it = toBeFoundAndMapped.find(name.str());
+                if (it != toBeFoundAndMapped.end()) {
+
+                    QualType qt = declaration->getUnderlyingType();
+                    const Type* t = qt.getTypePtrOrNull();
+                    if (t) {
+                        const CXXRecordDecl* decl = t->getAsCXXRecordDecl();
+                        addToBeMapped(decl);
+                        toBeFoundAndMapped.erase(it);
+                    }
                 }
             }
         }
-
         return true;
     }
 
